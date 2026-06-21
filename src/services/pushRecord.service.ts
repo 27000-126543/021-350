@@ -9,6 +9,10 @@ import {
   WeeklySummary,
   ReminderType,
   PushChannel as PC,
+  ChannelReceiptStats,
+  ChannelRetryResult,
+  ChannelRecentFailure,
+  channelLabels,
 } from '../types';
 
 type Pushable = StatusReminder | RiskAlert | WeeklySummary;
@@ -306,6 +310,146 @@ export class PushRecordService {
 
   getStatistics(fromDate?: string, toDate?: string) {
     return dataStore.getPushStatistics(fromDate, toDate);
+  }
+
+  getChannelReceiptStats(timeoutThresholdMinutes: number = 30): ChannelReceiptStats[] {
+    const allRecords = dataStore.getPushRecords().records;
+    const now = dayjs();
+
+    const channelMap = new Map<PushChannel, PushRecord[]>();
+    for (const record of allRecords) {
+      if (!channelMap.has(record.channel)) {
+        channelMap.set(record.channel, []);
+      }
+      channelMap.get(record.channel)!.push(record);
+    }
+
+    const result: ChannelReceiptStats[] = [];
+    for (const [channel, records] of channelMap) {
+      let pending = 0, success = 0, failed = 0, timeout = 0;
+      let totalDeliveryMinutes = 0, deliverySampleCount = 0;
+
+      for (const r of records) {
+        if (r.result === 'pending') {
+          const elapsed = now.diff(dayjs(r.generatedAt), 'minute');
+          if (elapsed >= timeoutThresholdMinutes) {
+            timeout++;
+          } else {
+            pending++;
+          }
+        } else if (r.result === 'success') {
+          success++;
+          if (r.pushedAt) {
+            const deliveryMinutes = dayjs(r.pushedAt).diff(dayjs(r.generatedAt), 'minute', true);
+            if (deliveryMinutes >= 0) {
+              totalDeliveryMinutes += deliveryMinutes;
+              deliverySampleCount++;
+            }
+          }
+        } else if (r.result === 'failed') {
+          failed++;
+        }
+      }
+
+      const total = records.length;
+      const completed = success + failed + timeout;
+      result.push({
+        channel,
+        channelLabel: channelLabels[channel],
+        total,
+        pending,
+        success,
+        failed,
+        timeout,
+        timeoutThresholdMinutes,
+        successRate: completed > 0 ? Math.round((success / completed) * 1000) / 10 : 0,
+        avgDeliveryMinutes: deliverySampleCount > 0 ? Math.round((totalDeliveryMinutes / deliverySampleCount) * 10) / 10 : 0,
+      });
+    }
+
+    return result;
+  }
+
+  retryByChannel(channel: PushChannel): ChannelRetryResult {
+    const allRecords = dataStore.getPushRecords().records;
+    const now = dayjs();
+    const timeoutThresholdMinutes = 30;
+
+    const targetRecords = allRecords.filter(r => {
+      if (r.channel !== channel) return false;
+      if (r.result === 'failed') return true;
+      if (r.result === 'pending') {
+        const elapsed = now.diff(dayjs(r.generatedAt), 'minute');
+        if (elapsed >= timeoutThresholdMinutes) return true;
+      }
+      return false;
+    });
+
+    let successCount = 0;
+    let failedCount = 0;
+    const details: ChannelRetryResult['details'] = [];
+
+    for (const r of targetRecords) {
+      const updated = dataStore.updatePushRecord(r.id, {
+        result: 'pending',
+        resultMessage: '手动重试',
+        pushedAt: undefined,
+      });
+
+      if (updated) {
+        successCount++;
+        details.push({
+          recordId: r.id,
+          result: 'success',
+          resultMessage: '手动重试',
+        });
+      } else {
+        failedCount++;
+        details.push({
+          recordId: r.id,
+          result: 'failed',
+          resultMessage: '重置失败',
+        });
+      }
+    }
+
+    return {
+      channel,
+      retriedCount: targetRecords.length,
+      successCount,
+      failedCount,
+      details,
+    };
+  }
+
+  getChannelRecentFailures(channel: PushChannel, limit: number = 10): ChannelRecentFailure[] {
+    const allRecords = dataStore.getPushRecords().records;
+    const now = dayjs();
+    const timeoutThresholdMinutes = 30;
+
+    const failedRecords = allRecords
+      .filter(r => {
+        if (r.channel !== channel) return false;
+        if (r.result === 'failed') return true;
+        if (r.result === 'pending') {
+          const elapsed = now.diff(dayjs(r.generatedAt), 'minute');
+          if (elapsed >= timeoutThresholdMinutes) return true;
+        }
+        return false;
+      })
+      .sort((a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime())
+      .slice(0, limit);
+
+    return failedRecords.map(r => ({
+      recordId: r.id,
+      reminderType: r.reminderType,
+      reminderId: r.reminderId,
+      channel: r.channel,
+      result: r.result === 'failed' ? 'failed' as const : 'timeout' as const,
+      resultMessage: r.resultMessage,
+      generatedAt: r.generatedAt,
+      lastAttemptAt: r.pushedAt || r.generatedAt,
+    }));
   }
 }
 

@@ -495,6 +495,13 @@ export interface CockpitOverview {
     totalEstimatedAmount: number;
     avgHandlingDurationDays: number;
     handlingCompletionRate: number;
+    weekOverWeek: {
+      newChangeDelta: number;
+      closedDelta: number;
+      overdueDelta: number;
+      riskDelta: number;
+      amountDelta: number;
+    };
   };
   weeklyTrend: CockpitWeekTrendPoint[];
   latestWeek: {
@@ -506,4 +513,126 @@ export interface CockpitOverview {
   };
   topOverdueProjects: { projectId: string; projectName: string; overdueCount: number; totalCount: number; overdueRatio: number }[];
   topRiskProfessionals: { key: Professional; label: string; riskCount: number; totalCount: number }[];
+  anomalyAlerts: CockpitAnomalyAlert[];
+}
+
+export interface CockpitAnomalyAlert {
+  type: 'overdue_spike' | 'risk_spike' | 'closure_drop' | 'amount_spike';
+  severity: 'high' | 'medium' | 'low';
+  projectId?: string;
+  projectName?: string;
+  professional?: Professional;
+  message: string;
+  currentValue: number;
+  previousValue: number;
+  changePercent: number;
+}
+
+export interface HandlingAttachment {
+  name: string;
+  url: string;
+  uploadedBy: string;
+  uploadedAt: string;
+}
+
+export interface ChannelReceiptStats {
+  channel: PushChannel;
+  channelLabel: string;
+  total: number;
+  pending: number;
+  success: number;
+  failed: number;
+  timeout: number;
+  timeoutThresholdMinutes: number;
+  successRate: number;
+  avgDeliveryMinutes: number;
+}
+
+export interface ChannelRetryResult {
+  channel: PushChannel;
+  retriedCount: number;
+  successCount: number;
+  failedCount: number;
+  details: { recordId: string; result: 'success' | 'failed'; resultMessage?: string }[];
+}
+
+export interface ChannelRecentFailure {
+  recordId: string;
+  reminderType: ReminderType;
+  reminderId: string;
+  channel: PushChannel;
+  result: 'failed' | 'timeout';
+  resultMessage?: string;
+  generatedAt: string;
+  lastAttemptAt: string;
+}
+
+export interface ManagerDashboard {
+  managerId: string;
+  managerName: string;
+  projectCount: number;
+  pendingCount: number;
+  overdueCount: number;
+  handledIn7Days: number;
+  totalIn7Days: number;
+  handlingEfficiency7d: number;
+  unclosedAmount: number;
+  projects: ManagerProjectItem[];
+}
+
+export interface ManagerProjectItem {
+  projectId: string;
+  projectName: string;
+  pendingCount: number;
+  overdueCount: number;
+  handledIn7Days: number;
+  unclosedAmount: number;
+  latestHandlingAt?: string;
+  reminders: ManagerReminderItem[];
+}
+
+export interface ManagerReminderItem {
+  reminderId: string;
+  reminderType: ReminderType;
+  title: string;
+  handlingStatus: ReminderHandlingStatus;
+  overdueDays?: number;
+  handlingDeadline?: string;
+  estimatedAmount?: number;
+  createdAt: string;
+  handledAt?: string;
+  handlingNote?: string;
+  handlingAttachments?: HandlingAttachment[];
+}
+
+export interface ClosureListExport {
+  exportTime: string;
+  filterDescription: string;
+  totalCount: number;
+  items: ClosureListItem[];
+  summary: {
+    totalHandled: number;
+    totalOverdue: number;
+    avgHandlingDays: number;
+    totalUnclosedAmount: number;
+  };
+}
+
+export interface ClosureListItem {
+  reminderId: string;
+  reminderType: ReminderType;
+  projectId: string;
+  projectName: string;
+  title: string;
+  handlingStatus: ReminderHandlingStatus;
+  createdAt: string;
+  handledAt?: string;
+  handlingDeadline?: string;
+  handlingDurationDays?: number;
+  overdueDays?: number;
+  handledBy?: string;
+  handlingNote?: string;
+  handlingAttachments?: HandlingAttachment[];
+  estimatedAmount?: number;
+  stage?: ReminderStage;
 }

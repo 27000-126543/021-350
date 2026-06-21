@@ -3,6 +3,7 @@ import { dataStore } from '../store/dataStore';
 import {
   CockpitOverview,
   CockpitWeekTrendPoint,
+  CockpitAnomalyAlert,
   Professional,
   ReminderStage,
   professionalLabels,
@@ -48,6 +49,17 @@ export class CockpitService {
     }
 
     const latest = weeklyTrend[weeklyTrend.length - 1];
+    const previous = weeklyTrend.length >= 2 ? weeklyTrend[weeklyTrend.length - 2] : undefined;
+
+    const weekOverWeek = {
+      newChangeDelta: previous ? latest.newChangeCount - previous.newChangeCount : 0,
+      closedDelta: previous ? latest.closedChangeCount - previous.closedChangeCount : 0,
+      overdueDelta: previous ? latest.overdueReminderCount - previous.overdueReminderCount : 0,
+      riskDelta: previous ? latest.riskAlertCount - previous.riskAlertCount : 0,
+      amountDelta: previous ? latest.totalEstimatedAmount - previous.totalEstimatedAmount : 0,
+    };
+
+    const anomalyAlerts = this.buildAnomalyAlerts(latest, previous);
     const latestWeek = this.buildLatestWeek(latest, histories[histories.length - 1], filter);
 
     const projects = dataStore.getAllProjects();
@@ -109,12 +121,85 @@ export class CockpitService {
         totalEstimatedAmount,
         avgHandlingDurationDays: durationSampleCount > 0 ? Math.round((totalDurationDays / durationSampleCount) * 10) / 10 : 0,
         handlingCompletionRate: handlingTotal > 0 ? Math.round((handlingHandled / handlingTotal) * 1000) / 10 : 0,
+        weekOverWeek,
       },
       weeklyTrend,
       latestWeek,
       topOverdueProjects,
       topRiskProfessionals,
+      anomalyAlerts,
     };
+  }
+
+  private buildAnomalyAlerts(
+    current: CockpitWeekTrendPoint,
+    previous: CockpitWeekTrendPoint | undefined
+  ): CockpitAnomalyAlert[] {
+    const alerts: CockpitAnomalyAlert[] = [];
+
+    if (!previous) return alerts;
+
+    const calcChangePercent = (curr: number, prev: number): number => {
+      if (prev === 0) return curr > 0 ? 100 : 0;
+      return Math.round(((curr - prev) / prev) * 1000) / 10;
+    };
+
+    const getSeverity = (changePercent: number): 'high' | 'medium' | 'low' => {
+      const abs = Math.abs(changePercent);
+      if (abs >= 100) return 'high';
+      if (abs >= 50) return 'medium';
+      return 'low';
+    };
+
+    const overdueChange = calcChangePercent(current.overdueReminderCount, previous.overdueReminderCount);
+    if (overdueChange >= 50) {
+      alerts.push({
+        type: 'overdue_spike',
+        severity: getSeverity(overdueChange),
+        message: `超期提醒数环比增长${overdueChange}%`,
+        currentValue: current.overdueReminderCount,
+        previousValue: previous.overdueReminderCount,
+        changePercent: overdueChange,
+      });
+    }
+
+    const riskChange = calcChangePercent(current.riskAlertCount, previous.riskAlertCount);
+    if (riskChange >= 100) {
+      alerts.push({
+        type: 'risk_spike',
+        severity: getSeverity(riskChange),
+        message: `风险预警数环比增长${riskChange}%`,
+        currentValue: current.riskAlertCount,
+        previousValue: previous.riskAlertCount,
+        changePercent: riskChange,
+      });
+    }
+
+    const closureChange = calcChangePercent(current.closedChangeCount, previous.closedChangeCount);
+    if (closureChange <= -50) {
+      alerts.push({
+        type: 'closure_drop',
+        severity: getSeverity(closureChange),
+        message: `闭合数环比下降${Math.abs(closureChange)}%`,
+        currentValue: current.closedChangeCount,
+        previousValue: previous.closedChangeCount,
+        changePercent: closureChange,
+      });
+    }
+
+    const amountChange = calcChangePercent(current.totalEstimatedAmount, previous.totalEstimatedAmount);
+    if (amountChange >= 100) {
+      alerts.push({
+        type: 'amount_spike',
+        severity: getSeverity(amountChange),
+        message: `变更金额环比增长${amountChange}%`,
+        currentValue: current.totalEstimatedAmount,
+        previousValue: previous.totalEstimatedAmount,
+        changePercent: amountChange,
+      });
+    }
+
+    return alerts;
   }
 
   private buildTrendPoint(summary: WeeklySummary, filter?: { projectId?: string; professional?: Professional }): CockpitWeekTrendPoint {

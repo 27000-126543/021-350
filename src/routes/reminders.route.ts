@@ -799,4 +799,79 @@ router.get('/cockpit/overview', (req: Request, res: Response) => {
   });
 });
 
+// ============================================================
+// 八、回执运营接口
+// ============================================================
+
+router.get('/push-records/channel-stats', (req: Request, res: Response) => {
+  const { timeoutMinutes } = req.query;
+  const stats = pushRecordService.getChannelReceiptStats(
+    timeoutMinutes ? parseInt(timeoutMinutes as string, 10) : undefined
+  );
+  res.json({
+    code: 0,
+    message: 'success',
+    data: stats,
+  });
+});
+
+router.post('/push-records/channel-retry/:channel', (req: Request, res: Response) => {
+  const { channel } = req.params;
+  const result = pushRecordService.retryByChannel(channel as PushChannel);
+  res.json({
+    code: 0,
+    message: `重试完成：${result.retriedCount}条，成功${result.successCount}条，失败${result.failedCount}条`,
+    data: result,
+  });
+});
+
+router.get('/push-records/channel-failures/:channel', (req: Request, res: Response) => {
+  const { channel } = req.params;
+  const { limit = '10' } = req.query;
+  const failures = pushRecordService.getChannelRecentFailures(
+    channel as PushChannel,
+    parseInt(limit as string, 10) || 10
+  );
+  res.json({
+    code: 0,
+    message: 'success',
+    data: failures,
+    total: failures.length,
+  });
+});
+
+// ============================================================
+// 九、责任人视角看板
+// ============================================================
+
+router.get('/manager-dashboard/:managerId', (req: Request, res: Response) => {
+  const { managerId } = req.params;
+  const dashboard = reminderHandlingService.getManagerDashboard(managerId);
+  res.json({
+    code: 0,
+    message: 'success',
+    data: dashboard,
+  });
+});
+
+// ============================================================
+// 十、闭环清单导出
+// ============================================================
+
+router.get('/closure-list', (req: Request, res: Response) => {
+  const { projectId, reminderType, handlingStatus, dateFrom, dateTo } = req.query;
+  const exportData = reminderHandlingService.exportClosureList({
+    projectId: projectId as string | undefined,
+    reminderType: reminderType as 'status_overdue' | 'risk_alert' | undefined,
+    handlingStatus: handlingStatus as ReminderHandlingStatus | undefined,
+    dateFrom: dateFrom as string | undefined,
+    dateTo: dateTo as string | undefined,
+  });
+  res.json({
+    code: 0,
+    message: 'success',
+    data: exportData,
+  });
+});
+
 export default router;
