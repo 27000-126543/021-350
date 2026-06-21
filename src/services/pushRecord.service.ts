@@ -220,16 +220,25 @@ export class PushRecordService {
     channel: PushChannel,
     result: 'success' | 'failed',
     resultMessage?: string
-  ): PushRecord[] {
-    return dataStore.updatePushRecordChannelResult(reminderType, reminderId, channel, result, resultMessage);
+  ): { success: boolean; message?: string; records?: PushRecord[] } {
+    const updated = dataStore.updatePushRecordChannelResult(reminderType, reminderId, channel, result, resultMessage);
+    if (!updated) {
+      return {
+        success: false,
+        message: `未找到对应的推送记录[提醒类型=${reminderType}, 提醒ID=${reminderId}, 渠道=${channel}]，请先确认该渠道已创建推送记录后再回写`,
+      };
+    }
+    return { success: true, records: updated };
   }
 
   batchUpdateChannelResults(
     items: { reminderType: ReminderType; reminderId: string; channel: PushChannel; result: 'success' | 'failed'; resultMessage?: string }[]
-  ): { success: number; failed: number; updated: PushRecord[] } {
+  ): { success: number; failed: number; notFound: number; updated: PushRecord[]; failures: { item: any; message: string }[] } {
     let successCount = 0;
     let failCount = 0;
+    let notFoundCount = 0;
     const allUpdated: PushRecord[] = [];
+    const failures: { item: any; message: string }[] = [];
     for (const item of items) {
       try {
         const updated = dataStore.updatePushRecordChannelResult(
@@ -239,13 +248,22 @@ export class PushRecordService {
           item.result,
           item.resultMessage
         );
-        successCount++;
-        allUpdated.push(...updated);
+        if (!updated) {
+          notFoundCount++;
+          failures.push({
+            item,
+            message: `未找到推送记录[提醒类型=${item.reminderType}, 提醒ID=${item.reminderId}, 渠道=${item.channel}]`,
+          });
+        } else {
+          successCount++;
+          allUpdated.push(...updated);
+        }
       } catch (e) {
         failCount++;
+        failures.push({ item, message: `处理异常: ${e instanceof Error ? e.message : String(e)}` });
       }
     }
-    return { success: successCount, failed: failCount, updated: allUpdated };
+    return { success: successCount, failed: failCount, notFound: notFoundCount, updated: allUpdated, failures };
   }
 
   getByReminderGrouped(reminderType: ReminderType, reminderId: string) {

@@ -17,6 +17,11 @@ import {
   ProjectReminderBoard,
   ReminderBoardItem,
   handlingStatusLabels,
+  HandlingRecordFilter,
+  OverdueRankItem,
+  RecentHandlingActivity,
+  ReminderFullFlow,
+  ReminderFlowStep,
 } from '../types';
 
 class DataStore {
@@ -366,7 +371,7 @@ class DataStore {
     channel: string,
     result: 'success' | 'failed',
     resultMessage?: string
-  ): PushRecord[] {
+  ): PushRecord[] | undefined {
     const updated: PushRecord[] = [];
     const now = dayjs().toISOString();
     for (const record of this.pushRecords.values()) {
@@ -381,7 +386,7 @@ class DataStore {
         updated.push(newRecord);
       }
     }
-    return updated;
+    return updated.length > 0 ? updated : undefined;
   }
 
   addHandlingRecord(record: ReminderHandlingRecord): ReminderHandlingRecord {
@@ -560,6 +565,153 @@ class DataStore {
 
   getWeeklySummariesTrend(weeks: number = 8): WeeklySummary[] {
     return this.getAllWeeklySummaries().slice(0, weeks);
+  }
+
+  getHandlingRecordsByFilter(filter: HandlingRecordFilter = {}): ReminderHandlingRecord[] {
+    let records = Array.from(this.reminderHandlingRecords.values());
+    if (filter.reminderId) records = records.filter(r => r.reminderId === filter.reminderId);
+    if (filter.reminderType) records = records.filter(r => r.reminderType === filter.reminderType);
+    if (filter.projectId) records = records.filter(r => r.projectId === filter.projectId);
+    if (filter.handledBy) records = records.filter(r => r.handledBy === filter.handledBy);
+    if (filter.projectManagerId) {
+      const validProjectIds = Array.from(this.projects.values())
+        .filter(p => (p.projectManagerId || p.projectManager) === filter.projectManagerId)
+        .map(p => p.id);
+      records = records.filter(r => validProjectIds.includes(r.projectId));
+    }
+    if (filter.deadlineFrom || filter.deadlineTo) {
+      const reminderMap: Record<string, StatusReminder | RiskAlert> = {};
+      for (const sr of this.statusReminders.values()) reminderMap[sr.id] = sr;
+      for (const ra of this.riskAlerts.values()) reminderMap[ra.id] = ra;
+      records = records.filter(r => {
+        const rm = reminderMap[r.reminderId];
+        if (!rm || !rm.handlingDeadline) return false;
+        const dl = rm.handlingDeadline;
+        if (filter.deadlineFrom && dl < filter.deadlineFrom) return false;
+        if (filter.deadlineTo && dl > filter.deadlineTo) return false;
+        return true;
+      });
+    }
+    return records.sort((a, b) => new Date(b.handledAt).getTime() - new Date(a.handledAt).getTime());
+  }
+
+  getOverdueRank(limit: number = 10): OverdueRankItem[] {
+    const now = dayjs();
+    const items: OverdueRankItem[] = [];
+    for (const sr of this.statusReminders.values()) {
+      if (['overdue_unhandled', 'unread', 'read', 'in_progress'].includes(sr.handlingStatus) && sr.handlingDeadline) {
+        const dl = dayjs(sr.handlingDeadline);
+        if (now.isAfter(dl)) {
+          items.push({
+            reminderId: sr.id,
+            reminderType: sr.type,
+            projectId: sr.projectId,
+            projectName: sr.projectName,
+            title: sr.title || `${sr.changeCode} ${sr.changeTitle}`,
+            projectManagerId: sr.projectManagerId,
+            projectManagerName: sr.projectManagerName,
+            handlingStatus: sr.handlingStatus,
+            overdueDays: now.diff(dl, 'day'),
+            handlingDeadline: sr.handlingDeadline,
+            stage: sr.stage,
+          });
+        }
+      }
+    }
+    for (const ra of this.riskAlerts.values()) {
+      if (['overdue_unhandled', 'unread', 'read', 'in_progress'].includes(ra.handlingStatus) && ra.handlingDeadline) {
+        const dl = dayjs(ra.handlingDeadline);
+        if (now.isAfter(dl)) {
+          items.push({
+            reminderId: ra.id,
+            reminderType: ra.type,
+            projectId: ra.projectId,
+            projectName: ra.projectName,
+            title: ra.title || `${ra.projectName}-${ra.professional}-${ra.changeCount}条变更`,
+            projectManagerId: this.getProject(ra.projectId)?.projectManagerId || this.getProject(ra.projectId)?.projectManager,
+            projectManagerName: this.getProject(ra.projectId)?.projectManagerName || this.getProject(ra.projectId)?.projectManager,
+            handlingStatus: ra.handlingStatus,
+            overdueDays: now.diff(dl, 'day'),
+            handlingDeadline: ra.handlingDeadline,
+          });
+        }
+      }
+    }
+    return items
+      .sort((a, b) => b.overdueDays - a.overdueDays)
+      .slice(0, limit);
+  }
+
+  getRecentHandlingActivities(limit: number = 20): RecentHandlingActivity[] {
+    const records = Array.from(this.reminderHandlingRecords.values())
+      .sort((a, b) => new Date(b.handledAt).getTime() - new Date(a.handledAt).getTime())
+      .slice(0, limit);
+    return records.map(r => ({
+      recordId: r.id,
+      reminderId: r.reminderId,
+      reminderType: r.reminderType,
+      projectId: r.projectId,
+      projectName: r.projectName,
+      title: (this.getStatusReminder(r.reminderId)?.title || this.getStatusReminder(r.reminderId)?.changeTitle
+        || this.getRiskAlert(r.reminderId)?.title || ''),
+      previousStatus: r.previousStatus,
+      newStatus: r.newStatus,
+      handledBy: r.handledBy,
+      handledAt: r.handledAt,
+      handlingNote: r.handlingNote,
+    }));
+  }
+
+  getReminderFullFlow(reminderType: 'status_overdue' | 'risk_alert', reminderId: string): ReminderFullFlow | undefined {
+    const reminder = reminderType === 'status_overdue'
+      ? this.getStatusReminder(reminderId)
+      : this.getRiskAlert(reminderId);
+    if (!reminder) return undefined;
+
+    const records = this.getHandlingRecordsByReminder(reminderId).slice().reverse();
+    const startTime = new Date(reminder.createdAt).getTime();
+    let lastTime = startTime;
+    const steps: ReminderFlowStep[] = [];
+    records.forEach((r, idx) => {
+      const at = new Date(r.handledAt).getTime();
+      steps.push({
+        stepIndex: idx + 1,
+        previousStatus: r.previousStatus,
+        newStatus: r.newStatus,
+        handledBy: r.handledBy,
+        handledAt: r.handledAt,
+        handlingNote: r.handlingNote,
+        handlingAttachments: r.handlingAttachments,
+        durationMinutesFromStart: Math.floor((at - startTime) / 60000),
+      });
+      lastTime = at;
+    });
+    if (steps.length === 0 || steps[0].previousStatus !== 'unread') {
+      steps.unshift({
+        stepIndex: 0,
+        previousStatus: null,
+        newStatus: 'unread',
+        handledBy: 'system',
+        handledAt: reminder.createdAt,
+        handlingNote: '系统生成提醒',
+        durationMinutesFromStart: 0,
+      });
+    }
+
+    return {
+      reminderId,
+      reminderType,
+      projectId: reminder.projectId,
+      projectName: reminder.projectName,
+      title: (reminder as any).title || (reminder as any).changeTitle || (reminder as any).suggestion?.slice(0, 40) || '',
+      currentStatus: reminder.handlingStatus,
+      createdAt: reminder.createdAt,
+      handlingDeadline: reminder.handlingDeadline,
+      steps,
+      totalDurationMinutes: Math.floor((Date.now() - startTime) / 60000),
+      handlingNote: reminder.handlingNote,
+      handlingAttachments: reminder.handlingAttachments,
+    };
   }
 
   clearAll(): void {

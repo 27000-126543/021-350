@@ -19,6 +19,8 @@ export interface Project {
   name: string;
   code: string;
   projectManager: string;
+  projectManagerId?: string;
+  projectManagerName?: string;
   projectManagerPhone: string;
   projectManagerEmail?: string;
   constructionScale: string;
@@ -51,9 +53,12 @@ export interface StatusReminder {
   type: 'status_overdue';
   projectId: string;
   projectName: string;
+  projectManagerId?: string;
+  projectManagerName?: string;
   changeId: string;
   changeCode: string;
   changeTitle: string;
+  title?: string;
   category: ChangeCategory;
   professional: Professional;
   overdueDays: number;
@@ -108,6 +113,7 @@ export interface RiskAlert {
   changes: RiskFactorItem[];
   riskLevel: 'high' | 'medium' | 'low';
   suggestion: string;
+  title?: string;
   handlingStatus: ReminderHandlingStatus;
   handlingNote?: string;
   handlingAttachments?: string[];
@@ -164,6 +170,8 @@ export interface WeeklySummary {
   totalEstimatedAmount: number;
   totalOverdueCount: number;
   totalRiskAlerts: number;
+  totalNewRiskAlerts?: number;
+  stageBreakdown?: { stage: ReminderStage; totalCount: number; overdueCount: number; avgOverdueDays: number }[];
   projectStats: ProjectWeeklyStats[];
   topRiskProjects: {
     projectId: string;
@@ -214,15 +222,23 @@ export interface ProjectReminderBoard {
   projectId: string;
   projectName: string;
   unread: ReminderBoardItem[];
+  read?: ReminderBoardItem[];
   inProgress: ReminderBoardItem[];
+  in_progress?: ReminderBoardItem[];
   handled: ReminderBoardItem[];
   overdueUnhandled: ReminderBoardItem[];
+  overdue?: ReminderBoardItem[];
   summary: {
     total: number;
     unreadCount: number;
     inProgressCount: number;
     handledCount: number;
     overdueUnhandledCount: number;
+    unread?: number;
+    read?: number;
+    inProgress?: number;
+    handled?: number;
+    overdueUnhandled?: number;
   };
 }
 
@@ -270,6 +286,9 @@ export interface ReminderRules {
   statusCheckCronExpression?: string;
   riskCheckCronExpression?: string;
   reminderHandlingDeadlineDays: number;
+  statusReminderChannels: PushChannel[];
+  riskAlertChannels: PushChannel[];
+  weeklySummaryChannels: PushChannel[];
 }
 
 export interface ReminderRulesLog {
@@ -296,6 +315,9 @@ export const defaultReminderRules: ReminderRules = {
   autoRunRiskCheck: true,
   autoGenerateWeeklySummary: true,
   reminderHandlingDeadlineDays: 3,
+  statusReminderChannels: ['wecom', 'sms', 'system'],
+  riskAlertChannels: ['wecom', 'email', 'system'],
+  weeklySummaryChannels: ['email', 'wecom', 'system'],
 };
 
 export interface PushRecord {
@@ -374,3 +396,114 @@ export const handlingStatusLabels: Record<ReminderHandlingStatus, string> = {
   handled: '已处理',
   overdue_unhandled: '超时未处理',
 };
+
+export interface HandlingRecordFilter {
+  reminderId?: string;
+  reminderType?: ReminderType;
+  projectId?: string;
+  projectManagerId?: string;
+  handlingStatus?: ReminderHandlingStatus;
+  deadlineFrom?: string;
+  deadlineTo?: string;
+  handledBy?: string;
+}
+
+export interface BoardFilter extends HandlingRecordFilter {
+  projectManagerId?: string;
+  sortBy?: 'overdue_days' | 'handling_deadline' | 'created_at';
+  sortOrder?: 'asc' | 'desc';
+}
+
+export interface OverdueRankItem {
+  reminderId: string;
+  reminderType: ReminderType;
+  projectId: string;
+  projectName: string;
+  title: string;
+  projectManagerId?: string;
+  projectManagerName?: string;
+  handlingStatus: ReminderHandlingStatus;
+  overdueDays: number;
+  handlingDeadline?: string;
+  stage?: ReminderStage;
+}
+
+export interface RecentHandlingActivity {
+  recordId: string;
+  reminderId: string;
+  reminderType: ReminderType;
+  projectId: string;
+  projectName: string;
+  title: string;
+  previousStatus: ReminderHandlingStatus | null;
+  newStatus: ReminderHandlingStatus;
+  handledBy: string;
+  handledAt: string;
+  handlingNote?: string;
+}
+
+export interface ReminderFlowStep {
+  stepIndex: number;
+  previousStatus: ReminderHandlingStatus | null;
+  newStatus: ReminderHandlingStatus;
+  handledBy: string;
+  handledAt: string;
+  handlingNote?: string;
+  handlingAttachments?: string[];
+  durationMinutesFromStart: number;
+}
+
+export interface ReminderFullFlow {
+  reminderId: string;
+  reminderType: ReminderType;
+  projectId: string;
+  projectName: string;
+  title: string;
+  currentStatus: ReminderHandlingStatus;
+  createdAt: string;
+  handlingDeadline?: string;
+  steps: ReminderFlowStep[];
+  totalDurationMinutes: number;
+  handlingNote?: string;
+  handlingAttachments?: string[];
+}
+
+export interface CockpitWeekTrendPoint {
+  weekStart: string;
+  weekEnd: string;
+  weekLabel: string;
+  newChangeCount: number;
+  closedChangeCount: number;
+  overdueReminderCount: number;
+  riskAlertCount: number;
+  totalEstimatedAmount: number;
+  byProject?: { key: string; label: string; newChangeCount: number; closedChangeCount: number; totalAmount: number }[];
+  byProfessional?: { key: string; label: string; newChangeCount: number; closedChangeCount: number; totalAmount: number }[];
+  byStage?: { key: string; label: string; overdueCount: number; handlingCount: number }[];
+}
+
+export interface CockpitOverview {
+  startDate: string;
+  endDate: string;
+  totalWeeks: number;
+  filter?: { projectId?: string; professional?: Professional };
+  summary: {
+    totalNewChange: number;
+    totalClosed: number;
+    totalOverdue: number;
+    totalRisk: number;
+    totalEstimatedAmount: number;
+    avgHandlingDurationDays: number;
+    handlingCompletionRate: number;
+  };
+  weeklyTrend: CockpitWeekTrendPoint[];
+  latestWeek: {
+    startDate: string;
+    endDate: string;
+    byProject: { key: string; label: string; newChangeCount: number; closedChangeCount: number; overdueCount: number; riskCount: number; totalAmount: number }[];
+    byProfessional: { key: string; label: string; newChangeCount: number; closedChangeCount: number; overdueCount: number; totalAmount: number }[];
+    byStage: { key: string; label: string; overdueCount: number; handlingCount: number }[];
+  };
+  topOverdueProjects: { projectId: string; projectName: string; overdueCount: number; totalCount: number; overdueRatio: number }[];
+  topRiskProfessionals: { key: Professional; label: string; riskCount: number; totalCount: number }[];
+}

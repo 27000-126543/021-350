@@ -6,6 +6,7 @@ import { weeklySummaryService } from '../services/weeklySummary.service';
 import { pushRecordService } from '../services/pushRecord.service';
 import { taskSchedulerService } from '../services/taskScheduler.service';
 import { reminderHandlingService } from '../services/reminderHandling.service';
+import { cockpitService } from '../services/cockpit.service';
 import { dataStore } from '../store/dataStore';
 import {
   ReminderRules,
@@ -13,6 +14,7 @@ import {
   PushChannel,
   PushResult,
   ReminderHandlingStatus,
+  Professional,
 } from '../types';
 
 const router = Router();
@@ -312,7 +314,7 @@ router.put('/rules', (req: Request, res: Response) => {
     'comprehensiveRiskThresholdCount', 'weeklySummaryDay', 'weeklySummaryHour',
     'weeklySummaryMinute', 'autoRunStatusCheck', 'autoRunRiskCheck',
     'autoGenerateWeeklySummary', 'statusCheckCronExpression', 'riskCheckCronExpression',
-    'reminderHandlingDeadlineDays',
+    'reminderHandlingDeadlineDays', 'statusReminderChannels', 'riskAlertChannels', 'weeklySummaryChannels',
   ];
 
   const filteredUpdates: Partial<ReminderRules> = {};
@@ -484,10 +486,14 @@ router.put('/push-records/channel/result', (req: Request, res: Response) => {
     result as 'success' | 'failed',
     resultMessage,
   );
+  if (!updated.success) {
+    res.status(404).json({ code: 404, message: updated.message, data: null });
+    return;
+  }
   res.json({
     code: 0,
-    message: `已更新 ${updated.length} 条「${channel}」渠道记录`,
-    data: updated,
+    message: `已更新 ${(updated.records || []).length} 条「${channel}」渠道记录`,
+    data: updated.records,
   });
 });
 
@@ -498,9 +504,10 @@ router.put('/push-records/channel/batch-result', (req: Request, res: Response) =
     return;
   }
   const result = pushRecordService.batchUpdateChannelResults(items);
-  res.json({
-    code: 0,
-    message: `批量处理完成：成功${result.success}条，失败${result.failed}条`,
+  const code = result.failed + result.notFound > 0 ? 207 : 0;
+  res.status(code === 0 ? 200 : 207).json({
+    code,
+    message: `批量处理完成：成功${result.success}条，失败${result.failed}条，未找到记录${result.notFound}条`,
     data: result,
   });
 });
@@ -585,17 +592,63 @@ router.post('/handling/:type/:id/status', (req: Request, res: Response) => {
 });
 
 router.get('/handling/records', (req: Request, res: Response) => {
-  const { reminderType, reminderId, projectId } = req.query;
-  const records = reminderHandlingService.getHandlingRecords(
-    reminderType as 'status_overdue' | 'risk_alert' | undefined,
-    reminderId as string | undefined,
-    projectId as string | undefined,
-  );
+  const { reminderType, reminderId, projectId, projectManagerId, handlingStatus, deadlineFrom, deadlineTo, handledBy } = req.query;
+  const records = reminderHandlingService.getHandlingRecords({
+    reminderType: reminderType as ReminderType | undefined,
+    reminderId: reminderId as string | undefined,
+    projectId: projectId as string | undefined,
+    projectManagerId: projectManagerId as string | undefined,
+    handlingStatus: handlingStatus as ReminderHandlingStatus | undefined,
+    deadlineFrom: deadlineFrom as string | undefined,
+    deadlineTo: deadlineTo as string | undefined,
+    handledBy: handledBy as string | undefined,
+  });
   res.json({
     code: 0,
     message: 'success',
     data: records,
     total: records.length,
+  });
+});
+
+router.get('/handling/overdue-rank', (req: Request, res: Response) => {
+  const { limit = '10' } = req.query;
+  const n = Math.min(Math.max(5, parseInt(limit as string, 10) || 10), 50);
+  const rank = reminderHandlingService.getOverdueRank(n);
+  res.json({
+    code: 0,
+    message: 'success',
+    data: rank,
+    total: rank.length,
+  });
+});
+
+router.get('/handling/recent-activities', (req: Request, res: Response) => {
+  const { limit = '20' } = req.query;
+  const n = Math.min(Math.max(5, parseInt(limit as string, 10) || 20), 100);
+  const activities = reminderHandlingService.getRecentActivities(n);
+  res.json({
+    code: 0,
+    message: 'success',
+    data: activities,
+    total: activities.length,
+  });
+});
+
+router.get('/handling/:type/:id/flow', (req: Request, res: Response) => {
+  const { type, id } = req.params;
+  const result = reminderHandlingService.getReminderFullFlow(
+    type as 'status_overdue' | 'risk_alert',
+    id
+  );
+  if (!result.success) {
+    res.status(404).json({ code: 404, message: result.message, data: null });
+    return;
+  }
+  res.json({
+    code: 0,
+    message: 'success',
+    data: result.flow,
   });
 });
 
@@ -613,14 +666,23 @@ router.post('/handling/refresh-overdue', (req: Request, res: Response) => {
 // ============================================================
 
 router.get('/board', (req: Request, res: Response) => {
-  const { projectId } = req.query;
-  const boards = reminderHandlingService.getBoard(projectId as string | undefined);
+  const { projectId, projectManagerId, reminderType, deadlineFrom, deadlineTo, sortBy, sortOrder } = req.query;
+  const boards = reminderHandlingService.getBoard({
+    projectId: projectId as string | undefined,
+    projectManagerId: projectManagerId as string | undefined,
+    reminderType: reminderType as ReminderType | undefined,
+    deadlineFrom: deadlineFrom as string | undefined,
+    deadlineTo: deadlineTo as string | undefined,
+    sortBy: sortBy as any,
+    sortOrder: sortOrder as any,
+  });
   res.json({
     code: 0,
     message: 'success',
     data: boards,
     totalProjects: boards.length,
     totalItems: boards.reduce((s, b) => s + b.summary.total, 0),
+    filter: { projectId, projectManagerId, reminderType, deadlineFrom, deadlineTo },
   });
 });
 
@@ -715,6 +777,25 @@ router.post('/tasks/restart', (req: Request, res: Response) => {
     code: 0,
     message: `重启完成：停止${result.stopped.length}个，启动${result.started.length}个`,
     data: result,
+  });
+});
+
+// ============================================================
+// 七、管理驾驶舱接口
+// ============================================================
+
+router.get('/cockpit/overview', (req: Request, res: Response) => {
+  const { weeks = '8', projectId, professional } = req.query;
+  const w = Math.min(Math.max(2, parseInt(weeks as string, 10) || 8), 52);
+  const overview = cockpitService.getOverview(w, {
+    projectId: projectId as string | undefined,
+    professional: professional as Professional | undefined,
+  });
+  res.json({
+    code: 0,
+    message: 'success',
+    data: overview,
+    weeks: w,
   });
 });
 

@@ -30,8 +30,9 @@ export class RiskAlertService {
 
     let pushRecordCount = 0;
     if (autoCreatePushRecords) {
+      const pushChannels = rules.riskAlertChannels;
       for (const alert of categoryAlerts) {
-        const records = pushRecordService.createPushRecordForRiskAlert(alert, ['system'], 'pending');
+        const records = pushRecordService.createPushRecordForRiskAlert(alert, pushChannels, 'pending');
         pushRecordCount += records.length;
       }
       for (const view of comprehensiveViews) {
@@ -46,13 +47,14 @@ export class RiskAlertService {
             totalEstimatedAmount: view.totalEstimatedAmount,
             changes: view.categoryBreakdown.flatMap(b => b.changes),
             riskLevel: view.overallRiskLevel,
+            title: `综合风险视图·${view.projectName}（${view.totalChangeCount}条）`,
             suggestion: view.overallSuggestion,
             handlingStatus: 'unread' as const,
             createdAt: view.createdAt,
           };
           const records = pushRecordService.createPushRecordForRiskAlert(
             pushReminder as any,
-            ['system'],
+            pushChannels,
             'pending'
           );
           pushRecordCount += records.length;
@@ -123,6 +125,7 @@ export class RiskAlertService {
         totalEstimatedAmount: totalAmount,
         changes: riskItems,
         riskLevel,
+        title: `风险提示·${professional}专业·${category}类变更集中出现（${recentChanges.length}条）`,
         suggestion: this.generateCategorySuggestion(
           category as ChangeCategory,
           professional as Professional,

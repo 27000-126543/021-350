@@ -5,7 +5,15 @@ import {
   ReminderHandlingRecord,
   ProjectReminderBoard,
   handlingStatusLabels,
+  HandlingRecordFilter,
+  BoardFilter,
+  OverdueRankItem,
+  RecentHandlingActivity,
+  ReminderFullFlow,
+  ReminderBoardItem,
 } from '../types';
+
+type BoardKey = 'unread' | 'read' | 'inProgress' | 'handled' | 'overdueUnhandled';
 
 export class ReminderHandlingService {
   markAsRead(
@@ -30,10 +38,29 @@ export class ReminderHandlingService {
     reminderType: 'status_overdue' | 'risk_alert',
     reminderId: string,
     handledBy: string,
-    handlingNote?: string,
+    handlingNote: string,
     handlingAttachments?: string[]
   ): { success: boolean; message: string; record?: ReminderHandlingRecord } {
-    return this.updateHandling(reminderType, reminderId, 'handled', handledBy, handlingNote, handlingAttachments);
+    if (!handlingNote || !handlingNote.trim()) {
+      return {
+        success: false,
+        message: '标记已处理必须填写处理说明（handlingNote），请补充处置措施、结果等说明后再提交',
+      };
+    }
+    if (handlingAttachments && !Array.isArray(handlingAttachments)) {
+      return {
+        success: false,
+        message: '附件链接必须是字符串数组，每个元素为一个独立的附件URL',
+      };
+    }
+    if (handlingAttachments) {
+      for (const url of handlingAttachments) {
+        if (typeof url !== 'string' || url.length < 4) {
+          return { success: false, message: `附件链接格式异常: ${url}` };
+        }
+      }
+    }
+    return this.updateHandling(reminderType, reminderId, 'handled', handledBy, handlingNote.trim(), handlingAttachments);
   }
 
   updateHandling(
@@ -70,20 +97,93 @@ export class ReminderHandlingService {
     };
   }
 
-  getBoard(projectId?: string): ProjectReminderBoard[] {
-    return dataStore.buildReminderBoard(projectId);
+  getBoard(filter: BoardFilter = {}): ProjectReminderBoard[] {
+    const boards = dataStore.buildReminderBoard(filter.projectId);
+    let result = boards;
+
+    if (filter.projectManagerId) {
+      const validProjectIds = new Set(
+        Array.from(dataStore.getAllProjects())
+          .filter(p => (p.projectManagerId || p.projectManager) === filter.projectManagerId)
+          .map(p => p.id)
+      );
+      result = result.filter(b => validProjectIds.has(b.projectId));
+    }
+
+    for (const b of result) {
+      if (!b.read) b.read = [];
+      const bucketMap: Record<string, ReminderBoardItem[]> = {
+        unread: b.unread || [],
+        read: b.read,
+        inProgress: b.inProgress || [],
+        handled: b.handled || [],
+        overdueUnhandled: b.overdueUnhandled || [],
+      };
+
+      for (const key of Object.keys(bucketMap) as BoardKey[]) {
+        let list = bucketMap[key];
+        if (filter.reminderType) {
+          list = list.filter(i => i.reminderType === filter.reminderType);
+        }
+        if (filter.deadlineFrom || filter.deadlineTo) {
+          list = list.filter(i => {
+            const dl = i.handlingDeadline;
+            if (!dl) return false;
+            if (filter.deadlineFrom && dl < filter.deadlineFrom) return false;
+            if (filter.deadlineTo && dl > filter.deadlineTo) return false;
+            return true;
+          });
+        }
+        bucketMap[key] = list;
+      }
+
+      b.unread = bucketMap.unread;
+      b.read = bucketMap.read;
+      b.inProgress = bucketMap.inProgress;
+      b.handled = bucketMap.handled;
+      b.overdueUnhandled = bucketMap.overdueUnhandled;
+      b.in_progress = b.inProgress;
+      b.overdue = b.overdueUnhandled;
+
+      const summary = {
+        total: b.unread.length + b.read.length + b.inProgress.length + b.handled.length + b.overdueUnhandled.length,
+        unreadCount: b.unread.length,
+        inProgressCount: b.inProgress.length,
+        handledCount: b.handled.length,
+        overdueUnhandledCount: b.overdueUnhandled.length,
+        unread: b.unread.length,
+        read: b.read.length,
+        inProgress: b.inProgress.length,
+        handled: b.handled.length,
+        overdueUnhandled: b.overdueUnhandled.length,
+      };
+      b.summary = summary;
+    }
+
+    return result;
   }
 
-  getHandlingRecords(reminderType?: 'status_overdue' | 'risk_alert', reminderId?: string, projectId?: string): ReminderHandlingRecord[] {
-    if (reminderId && reminderType) {
-      return dataStore.getHandlingRecordsByReminder(reminderId);
+  getHandlingRecords(filter: HandlingRecordFilter = {}): ReminderHandlingRecord[] {
+    return dataStore.getHandlingRecordsByFilter(filter);
+  }
+
+  getOverdueRank(limit: number = 10): OverdueRankItem[] {
+    return dataStore.getOverdueRank(limit);
+  }
+
+  getRecentActivities(limit: number = 20): RecentHandlingActivity[] {
+    return dataStore.getRecentHandlingActivities(limit);
+  }
+
+  getReminderFullFlow(
+    reminderType: 'status_overdue' | 'risk_alert',
+    reminderId: string
+  ): { success: boolean; message?: string; flow?: ReminderFullFlow } {
+    const flow = dataStore.getReminderFullFlow(reminderType, reminderId);
+    if (!flow) {
+      return { success: false, message: `未找到对应的提醒记录[类型=${reminderType}, ID=${reminderId}]` };
     }
-    if (projectId) {
-      let records = dataStore.getHandlingRecordsByProject(projectId);
-      if (reminderType) records = records.filter(r => r.reminderType === reminderType);
-      return records;
-    }
-    return [];
+    return { success: true, flow };
   }
 
   getHandlingDeadline(): dayjs.Dayjs {

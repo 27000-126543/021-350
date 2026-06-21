@@ -93,6 +93,13 @@ export class WeeklySummaryService {
     );
     structuredData.weeklyTrend = this.buildTrendData(8);
 
+    const stageBreakdown = (structuredData.byStage || []).map(b => ({
+      stage: b.key as ReminderStage,
+      totalCount: b.count,
+      overdueCount: b.overdueCount || 0,
+      avgOverdueDays: 0,
+    }));
+
     const summary: WeeklySummary = {
       id: dataStore.generateId(),
       type: 'weekly_summary',
@@ -107,6 +114,8 @@ export class WeeklySummaryService {
       totalEstimatedAmount,
       totalOverdueCount,
       totalRiskAlerts,
+      totalNewRiskAlerts: totalRiskAlerts,
+      stageBreakdown,
       projectStats,
       topRiskProjects: topRiskProjects.map(p => ({
         projectId: p.projectId,
@@ -127,9 +136,10 @@ export class WeeklySummaryService {
 
     let pushRecordCount = 0;
     if (autoCreatePushRecord) {
+      const rules = dataStore.getReminderRules();
       const records = pushRecordService.createPushRecordForWeeklySummary(
         summary,
-        ['system', 'email'],
+        rules.weeklySummaryChannels,
         'pending'
       );
       pushRecordCount = records.length;

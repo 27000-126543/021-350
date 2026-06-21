@@ -50,9 +50,12 @@ export class StatusReminderService {
         type: 'status_overdue',
         projectId: change.projectId,
         projectName: project.name,
+        projectManagerId: project.projectManagerId || project.projectManager,
+        projectManagerName: project.projectManagerName || project.projectManager,
         changeId: change.id,
         changeCode: change.code,
         changeTitle: change.title,
+        title: `${change.code} ${change.title}`,
         category: change.category,
         professional: change.professional,
         overdueDays,
@@ -78,7 +81,8 @@ export class StatusReminderService {
     let pushRecordCount = 0;
     if (autoCreatePushRecords) {
       for (const reminder of newReminders) {
-        const records = pushRecordService.createPushRecordForStatusReminder(reminder, ['system'], 'pending');
+        const rules = dataStore.getReminderRules();
+        const records = pushRecordService.createPushRecordForStatusReminder(reminder, rules.statusReminderChannels, 'pending');
         pushRecordCount += records.length;
       }
     }
