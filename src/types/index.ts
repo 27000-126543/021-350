@@ -6,12 +6,19 @@ export type Professional = 'architecture' | 'structure' | 'mechanical' | 'electr
 
 export type ReminderType = 'status_overdue' | 'risk_alert' | 'weekly_summary';
 
+export type PushChannel = 'wecom' | 'sms' | 'email' | 'system' | 'contract_system';
+
+export type PushResult = 'pending' | 'success' | 'failed';
+
+export type ReminderStage = 'registered_to_supervisor' | 'supervisor_to_design' | 'design_to_close';
+
 export interface Project {
   id: string;
   name: string;
   code: string;
   projectManager: string;
   projectManagerPhone: string;
+  projectManagerEmail?: string;
   constructionScale: string;
   startDate: string;
   endDate: string;
@@ -49,11 +56,18 @@ export interface StatusReminder {
   professional: Professional;
   overdueDays: number;
   currentStatus: ChangeStatus;
+  stage: ReminderStage;
+  isActive: boolean;
+  invalidatedAt?: string;
+  invalidatedReason?: string;
   registeredDate: string;
+  stageStartDate: string;
   dueDate: string;
   recipient: string;
   recipientPhone: string;
+  recipientEmail?: string;
   createdAt: string;
+  lastUpdatedAt: string;
 }
 
 export interface RiskFactorItem {
@@ -62,6 +76,15 @@ export interface RiskFactorItem {
   changeTitle: string;
   registeredDate: string;
   estimatedAmount: number;
+  category: ChangeCategory;
+}
+
+export interface RiskCategoryBreakdown {
+  category: ChangeCategory;
+  count: number;
+  totalAmount: number;
+  changes: RiskFactorItem[];
+  suggestion: string;
 }
 
 export interface RiskAlert {
@@ -78,6 +101,22 @@ export interface RiskAlert {
   riskLevel: 'high' | 'medium' | 'low';
   suggestion: string;
   createdAt: string;
+}
+
+export interface ComprehensiveRiskView {
+  id: string;
+  projectId: string;
+  projectName: string;
+  professional: Professional;
+  timeWindowDays: number;
+  totalChangeCount: number;
+  totalEstimatedAmount: number;
+  overallRiskLevel: 'high' | 'medium' | 'low';
+  categoryBreakdown: RiskCategoryBreakdown[];
+  meetingFocus: string[];
+  overallSuggestion: string;
+  createdAt: string;
+  lastUpdatedAt: string;
 }
 
 export interface ProjectWeeklyStats {
@@ -103,40 +142,90 @@ export interface WeeklySummary {
   weekStart: string;
   weekEnd: string;
   generatedAt: string;
+  generatedAutomatically: boolean;
   totalProjects: number;
   totalNewChanges: number;
   totalClosedChanges: number;
   overallClosureRate: number;
   totalEstimatedAmount: number;
   totalOverdueCount: number;
+  totalRiskAlerts: number;
   projectStats: ProjectWeeklyStats[];
   topRiskProjects: {
     projectId: string;
     projectName: string;
     riskCount: number;
   }[];
+  topOverdueProjects: {
+    projectId: string;
+    projectName: string;
+    overdueCount: number;
+  }[];
   summaryText: string;
+  smsText: string;
 }
 
 export interface ReminderRules {
   supervisorReviewDays: number;
   designReviewDays: number;
+  designFinalReviewDays: number;
   riskTimeWindowDays: number;
   riskThresholdCount: number;
   highRiskThresholdCount: number;
+  comprehensiveRiskThresholdCount: number;
   weeklySummaryDay: number;
   weeklySummaryHour: number;
+  weeklySummaryMinute: number;
+  autoRunStatusCheck: boolean;
+  autoRunRiskCheck: boolean;
+  autoGenerateWeeklySummary: boolean;
+  statusCheckCronExpression?: string;
+  riskCheckCronExpression?: string;
+}
+
+export interface ReminderRulesLog {
+  id: string;
+  changedBy: string;
+  previousRules: Partial<ReminderRules>;
+  newRules: Partial<ReminderRules>;
+  changedAt: string;
+  description: string;
 }
 
 export const defaultReminderRules: ReminderRules = {
   supervisorReviewDays: 7,
   designReviewDays: 14,
+  designFinalReviewDays: 21,
   riskTimeWindowDays: 15,
   riskThresholdCount: 3,
   highRiskThresholdCount: 5,
+  comprehensiveRiskThresholdCount: 6,
   weeklySummaryDay: 1,
   weeklySummaryHour: 9,
+  weeklySummaryMinute: 0,
+  autoRunStatusCheck: true,
+  autoRunRiskCheck: true,
+  autoGenerateWeeklySummary: true,
 };
+
+export interface PushRecord {
+  id: string;
+  reminderType: ReminderType;
+  reminderId: string;
+  channel: PushChannel;
+  recipientIds: string[];
+  recipientNames: string[];
+  recipientPhones: string[];
+  recipientEmails: string[];
+  title: string;
+  content: string;
+  summary?: string;
+  result: PushResult;
+  resultMessage?: string;
+  generatedAt: string;
+  pushedAt?: string;
+  metadata?: Record<string, any>;
+}
 
 export const categoryLabels: Record<ChangeCategory, string> = {
   design_omission: '设计遗漏',
@@ -166,4 +255,24 @@ export const riskLevelLabels: Record<string, string> = {
   high: '高风险',
   medium: '中风险',
   low: '低风险',
+};
+
+export const stageLabels: Record<ReminderStage, string> = {
+  registered_to_supervisor: '登记→监理意见',
+  supervisor_to_design: '监理→设计意见',
+  design_to_close: '设计→最终闭合',
+};
+
+export const channelLabels: Record<PushChannel, string> = {
+  wecom: '企业微信',
+  sms: '短信',
+  email: '邮件',
+  system: '系统消息',
+  contract_system: '合同系统',
+};
+
+export const resultLabels: Record<PushResult, string> = {
+  pending: '待推送',
+  success: '推送成功',
+  failed: '推送失败',
 };
