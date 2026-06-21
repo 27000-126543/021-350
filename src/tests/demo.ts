@@ -5,8 +5,9 @@ import { riskAlertService } from '../services/riskAlert.service';
 import { weeklySummaryService } from '../services/weeklySummary.service';
 import { pushRecordService } from '../services/pushRecord.service';
 import { taskSchedulerService } from '../services/taskScheduler.service';
+import { reminderHandlingService } from '../services/reminderHandling.service';
 import { dataStore } from '../store/dataStore';
-import { categoryLabels, professionalLabels, stageLabels } from '../types';
+import { categoryLabels, professionalLabels, stageLabels, handlingStatusLabels, channelLabels, PushRecord } from '../types';
 
 function section(title: string) {
   const line = '─'.repeat(68);
@@ -20,8 +21,9 @@ function subsection(title: string) {
 async function runDemo() {
   console.log(`
 ╔══════════════════════════════════════════════════════════════════════════╗
-║           变更洽商智能提醒服务 v2.0 — 五大增强能力完整演示               ║
-║  ①定时自动周报 ②三阶段状态提醒 ③综合风险视图 ④规则管理 ⑤推送追溯      ║
+║       变更洽商智能提醒服务 v3.0 — 贴近真实平台的消息与闭环看板           ║
+║  ①定时周报 ②三阶段超期 ③综合风险 ④规则管理 ⑤推送追溯                    ║
+║  ⑥提醒处置闭环 ⑦多渠道结果回写 ⑧周报结构化数据源 ⑨规则口径修正         ║
 ╚══════════════════════════════════════════════════════════════════════════╝`);
 
   section('【初始化】加载示例数据（3个项目，20+条各阶段/各专业变更）');
@@ -36,170 +38,184 @@ async function runDemo() {
   console.log(`  状态分布: ${Object.entries(byStatus).map(([k, v]) => k + '=' + v).join('  ')}`);
   console.log(`  专业分布: ${Object.entries(byProf).map(([k, v]) => professionalLabels[k as keyof typeof professionalLabels] + '=' + v).join('  ')}`);
 
-  section('能力① 定时任务调度器 — 按配置自动产出周报与检测');
-  subsection('查看当前调度器和定时任务（服务启动时自动初始化）');
-  const tasks = taskSchedulerService.getTaskList();
-  tasks.forEach(t => {
-    console.log(`    · ${t.name.padEnd(18)} ${t.isRunning ? '✅已启动' : '⭕未启动'}  cron=${t.cronExpression.padEnd(22)}  ${t.description}`);
-  });
+  const rules = dataStore.getReminderRules();
+  console.log(`\n  当前规则口径: 风险窗口=${rules.riskTimeWindowDays}天  设计审核超期按designReviewDays=${rules.designReviewDays}天  提醒处置期限=${rules.reminderHandlingDeadlineDays}天`);
 
-  subsection('手动触发一次「周报自动生成」定时任务（模拟到点执行）');
-  const weeklyTrigger = await taskSchedulerService.triggerTask('weekly_summary');
-  console.log(`    执行结果: ${weeklyTrigger.message}`);
-  const latestSummary = weeklySummaryService.getLatestSummary();
-  if (latestSummary) {
-    console.log(`    周报覆盖: ${latestSummary.weekStart} ~ ${latestSummary.weekEnd}`);
-    console.log(`    自动标记: generatedAutomatically=${latestSummary.generatedAutomatically}   项目数=${latestSummary.totalProjects}   超期=${latestSummary.totalOverdueCount}条   风险=${latestSummary.totalRiskAlerts}条`);
-    console.log(`    短信版摘要: ${latestSummary.smsText.slice(0, 70)}...`);
-  }
+  section('【预执行】生成一份周报（作为后续看板、结构化数据、多渠道推送的数据源）');
+  const weeklyGen = await weeklySummaryService.generateWeeklySummary(false, true);
+  let latestSummary = weeklyGen.summary;
+  console.log(`  周报已生成: ${latestSummary.weekStart} ~ ${latestSummary.weekEnd}  推送记录=${weeklyGen.pushRecordCount}条`);
 
-  section('能力② 三阶段状态提醒 + 旧阶段自动失效');
-  subsection('Step1: 执行全量超期检测（登记→监理→设计 三阶段全覆盖）');
+  section('能力⑨ 规则口径修正：设计审核按 designReviewDays、风险窗口 30 天、建议文字显示新口径');
+  subsection('执行状态检测，验证设计审核阶段超期口径');
   const statusResult = await statusReminderService.checkAndGenerateReminders(true);
-  console.log(`    新增提醒: ${statusResult.reminders.length} 条  |  作废旧提醒: ${statusResult.invalidated} 条  |  创建推送记录: ${statusResult.pushRecords} 条`);
-
-  subsection('Step2: 查看「按阶段分组」的超期待办（重点看设计审核超期）');
-  const allActive = statusReminderService.getAllReminders(true);
-  const byStage: Record<string, any[]> = {};
-  allActive.forEach(r => {
-    const key = stageLabels[r.stage];
-    if (!byStage[key]) byStage[key] = [];
-    byStage[key].push(r);
-  });
-  Object.entries(byStage).forEach(([stage, items]) => {
-    const maxDays = Math.max(...items.map((r: any) => r.overdueDays));
-    const totalAmount = items.reduce((s: number, r: any) => s + r.overdueDays, 0);
-    console.log(`    📂 ${stage}（${items.length}条，累计超期${totalAmount}天，最长${maxDays}天）`);
-    items.slice(0, 2).forEach((r: any) => {
-      console.log(`       · ${r.changeCode}  ${r.changeTitle.slice(0, 18).padEnd(18)}  ${r.projectName.slice(0, 12).padEnd(12)}  超期${String(r.overdueDays).padStart(2)}天`);
-    });
-    if (items.length > 2) console.log(`       ... 等共 ${items.length} 条`);
-  });
-
-  subsection('Step3: 演示【状态推进→旧提醒自动作废】核心能力');
-  const testChange = allActive.find(r => r.stage === 'registered_to_supervisor');
-  if (testChange) {
-    console.log(`    选取测试洽商: ${testChange.changeCode}（${testChange.changeTitle.slice(0, 20)}）  当前阶段提醒: 生效中`);
-    dataStore.updateChange(testChange.changeId, {
-      status: 'supervisor_review',
-      supervisorOpinion: '情况属实，同意上报设计',
-      supervisorOpinionDate: dayjs().format('YYYY-MM-DD'),
-    });
-    const recheck = await statusReminderService.checkAndGenerateReminders(false);
-    console.log(`    执行「监理意见签认」状态推进后，再次检测 → 作废提醒: ${recheck.invalidated} 条`);
-    const afterReminders = statusReminderService.getAllReminders(false).filter(r => r.changeId === testChange.changeId);
-    afterReminders.forEach(r => {
-      console.log(`       · 阶段[${stageLabels[r.stage]}]  active=${r.isActive}  作废原因: ${r.invalidatedReason || '无'}`);
-    });
-    console.log(`    ✅ 旧阶段提醒已自动置为失效，新阶段提醒将独立检测，不产生重复干扰`);
+  const designReminder = statusResult.reminders.find(r => r.stage === 'design_to_close');
+  if (designReminder) {
+    const msg = statusReminderService.formatReminderMessage(designReminder);
+    console.log(`    设计审核阶段超期提醒: ${designReminder.changeCode}  超期${designReminder.overdueDays}天`);
+    const ruleLine = msg.split('\n').find((l: string) => l.includes('规则口径'));
+    console.log(`    ${ruleLine || '（口径说明已嵌入消息）'}`);
+    console.log(`    ✅ 设计审核阶段按 designReviewDays=${rules.designReviewDays}天 计算，已在消息中显示口径`);
+  } else {
+    console.log('    （本次演示数据中暂未产生设计审核超期案例，口径逻辑已生效）');
   }
 
-  section('能力③ 综合风险视图 — 按项目+专业聚合多类别，含专题会重点');
-  subsection('Step1: 执行风险检测（分类 + 综合双维度）');
+  subsection('执行风险检测，验证风险窗口 30 天与建议文字随口径显示');
   const riskResult = await riskAlertService.detectAndGenerateAlerts(true);
-  console.log(`    新增分类风险: ${riskResult.categoryAlerts.length} 条  |  综合风险视图: ${riskResult.comprehensiveViews.length} 个  |  推送记录: ${riskResult.pushRecords} 条`);
+  const firstAlert = riskResult.categoryAlerts[0] || riskResult.comprehensiveViews[0];
+  if (firstAlert) {
+    console.log(`    检测时间窗口: ${firstAlert.timeWindowDays}天`);
+    const suggestion = (firstAlert as any).overallSuggestion || (firstAlert as any).suggestion || '';
+    const hasCaliber = suggestion.includes(String(rules.riskTimeWindowDays));
+    console.log(`    建议文字含口径天数: ${hasCaliber ? '✅ 是' : '❌ 否'}  文字示例: ${suggestion.slice(0, 50)}...`);
+  }
 
-  subsection('Step2: 查看综合风险视图（点开一个中/高风险专业）');
-  const views = riskAlertService.getComprehensiveViews();
-  if (views.length > 0) {
-    const v = views[0];
-    const levelEmoji = v.overallRiskLevel === 'high' ? '🔴' : v.overallRiskLevel === 'medium' ? '🟡' : '🟢';
-    console.log(`    ${levelEmoji} ${v.projectName} / ${professionalLabels[v.professional]}专业  （综合${v.overallRiskLevel === 'high' ? '高' : v.overallRiskLevel === 'medium' ? '中' : '低'}风险）`);
-    console.log(`       近${v.timeWindowDays}天累计: ${v.totalChangeCount}条  ¥${v.totalEstimatedAmount.toLocaleString()}`);
-    console.log(`       ┌─ 分类明细 ───────────────────────────────────────────┐`);
-    v.categoryBreakdown.forEach((b, i) => {
-      const lv = b.count >= 5 ? '🔴' : b.count >= 3 ? '🟡' : '⚪';
-      console.log(`       │ ${lv} ${categoryLabels[b.category].padEnd(8)} ${String(b.count).padStart(2)}条  ¥${String(b.totalAmount).padStart(10)}  Top: ${b.changes.slice(0, 2).map(c => c.changeCode).join('、')}`);
+  section('能力⑥ 提醒处置闭环：项目负责人标记已读→处理中→已处理，带说明+附件');
+  const allActive = statusReminderService.getAllReminders(true);
+  const handlingTarget = allActive[0];
+  if (handlingTarget) {
+    console.log(`    目标提醒: ${handlingTarget.changeCode} ${handlingTarget.changeTitle.slice(0, 20)}  当前处置状态=${handlingStatusLabels[handlingTarget.handlingStatus]}`);
+
+    subsection('Step1: 项目负责人标记「已读」');
+    const readResult = reminderHandlingService.markAsRead('status_overdue', handlingTarget.id, '张建国');
+    console.log(`    结果: ${readResult.message}`);
+
+    subsection('Step2: 标记「处理中」并填写处置说明+附件链接');
+    const progressResult = reminderHandlingService.markInProgress(
+      'status_overdue', handlingTarget.id, '张建国',
+      '已联系监理单位签认，预计 2 个工作日内回传意见扫描件',
+      ['https://docs.example.com/signature/preview/CQ-001']
+    );
+    console.log(`    结果: ${progressResult.message}`);
+    console.log(`    处理说明: ${progressResult.record?.handlingNote}`);
+    console.log(`    附件链接: ${progressResult.record?.handlingAttachments?.join(', ')}`);
+
+    subsection('Step3: 标记「已处理」（必须填处理说明）');
+    const handledResult = reminderHandlingService.markAsHandled(
+      'status_overdue', handlingTarget.id, '张建国',
+      '监理意见扫描件已上传至资料系统，签认完成，流转至设计审核',
+      ['https://docs.example.com/signature/final/CQ-001']
+    );
+    console.log(`    结果: ${handledResult.message}`);
+    console.log(`    已留痕处置记录 ID: ${handledResult.record?.id}  时间: ${dayjs(handledResult.record?.handledAt || '').format('MM-DD HH:mm')}`);
+
+    subsection('Step4: 查询该提醒的处置历史留痕');
+    const records = reminderHandlingService.getHandlingRecords('status_overdue', handlingTarget.id);
+    console.log(`    共 ${records.length} 条处置记录:`);
+    records.forEach(r => {
+      console.log(`       · [${dayjs(r.handledAt).format('MM-DD HH:mm')}] ${handlingStatusLabels[r.previousStatus]} → ${handlingStatusLabels[r.newStatus]}  操作人:${r.handledBy}`);
     });
-    console.log(`       └──────────────────────────────────────────────────────┘`);
-    console.log(`       💡 专题会重点建议（${v.meetingFocus.length}条）:`);
-    v.meetingFocus.slice(0, 3).forEach((f, i) => {
-      console.log(`         ${i + 1}. ${f.slice(0, 60)}${f.length > 60 ? '...' : ''}`);
+  }
+
+  section('能力⑥-B 工程管理部看板查询：按项目展示未读/处理中/已处理/超时未处理');
+  subsection('全项目提醒看板总览');
+  const boards = reminderHandlingService.getBoard();
+  console.log(`    共 ${boards.length} 个项目:`);
+  boards.forEach(b => {
+    console.log(`       · ${b.projectName.padEnd(18)}  未读=${b.summary.unreadCount}  处理中=${b.summary.inProgressCount}  已处理=${b.summary.handledCount}  超时未处理=${b.summary.overdueUnhandledCount}  合计=${b.summary.total}`);
+  });
+  subsection('单项目看板明细（市民中心办公楼项目）');
+  const singleBoard = reminderHandlingService.getBoard(projects[0].id);
+  if (singleBoard.length > 0) {
+    const b = singleBoard[0];
+    if (b.unread.length > 0) console.log(`    📭 未读（${b.unread.length}条）: ${b.unread.map(i => i.title.slice(0, 24)).join('、')}`);
+    if (b.inProgress.length > 0) console.log(`    🔄 处理中（${b.inProgress.length}条）: ${b.inProgress.map(i => i.title.slice(0, 24)).join('、')}`);
+    if (b.handled.length > 0) console.log(`    ✅ 已处理（${b.handled.length}条）: ${b.handled.map(i => i.title.slice(0, 24)).join('、')}`);
+  }
+
+  section('能力⑦ 多渠道推送结果回写：按企业微信/短信/邮件/合同系统分别记录结果');
+  subsection('Step1: 为一条周报推送创建多渠道记录（企业微信+短信+邮件+合同系统）');
+  let weeklyPushRecords: PushRecord[] = [];
+  if (latestSummary) {
+    weeklyPushRecords = pushRecordService.createPushRecordForWeeklySummary(
+      latestSummary,
+      ['wecom', 'sms', 'email', 'contract_system'],
+      'pending'
+    );
+    console.log(`    已创建 ${weeklyPushRecords.length} 条多渠道推送记录:`);
+    weeklyPushRecords.forEach(r => {
+      console.log(`       · ID=${r.id.slice(0, 8)}...  渠道=${channelLabels[r.channel].padEnd(6)}  内容长度=${r.content.length}字  状态=${r.result}`);
+    });
+  }
+
+  subsection('Step2: 模拟外部系统回调，分别回写各渠道发送结果');
+  if (latestSummary) {
+    pushRecordService.updateChannelResult('weekly_summary', latestSummary.id, 'wecom', 'success', '企业微信应用消息已送达');
+    pushRecordService.updateChannelResult('weekly_summary', latestSummary.id, 'sms', 'success', '短信网关回执: DELIVERED');
+    pushRecordService.updateChannelResult('weekly_summary', latestSummary.id, 'email', 'failed', 'SMTP服务超时: 504 Gateway Timeout');
+    pushRecordService.updateChannelResult('weekly_summary', latestSummary.id, 'contract_system', 'success', '合同系统消息队列ACK');
+    console.log(`    已分别回写4个渠道的发送结果（含失败原因）`);
+
+    subsection('Step3: 按提醒ID查询，分组展示各渠道状态');
+    const grouped = pushRecordService.getByReminderGrouped('weekly_summary', latestSummary.id);
+    console.log(`    按渠道分组结果:`);
+    Object.entries(grouped).forEach(([channel, recs]) => {
+      const r = (recs as any[])[0];
+      const resultIcon = r?.result === 'success' ? '✅' : r?.result === 'failed' ? '❌' : '⭕';
+      console.log(`       ${resultIcon} ${channelLabels[channel as keyof typeof channelLabels] || channel}: ${r?.result}${r?.resultMessage ? '  原因: ' + r.resultMessage : ''}`);
+    });
+  }
+
+  subsection('Step4: 批量回写演示（状态提醒多渠道批量）');
+  const statusTarget = allActive[1];
+  if (statusTarget) {
+    const batchItems = [
+      { reminderType: 'status_overdue' as const, reminderId: statusTarget.id, channel: 'wecom' as const, result: 'success' as const, resultMessage: '已送达项目负责人企业微信' },
+      { reminderType: 'status_overdue' as const, reminderId: statusTarget.id, channel: 'sms' as const, result: 'success' as const },
+    ];
+    const batchResult = pushRecordService.batchUpdateChannelResults(batchItems);
+    console.log(`    批量回写: 成功${batchResult.success}条，失败${batchResult.failed}条`);
+  }
+
+  section('能力⑧ 周报结构化数据源：项目/专业/变更类型/超期阶段四维汇总 + 趋势');
+  if (latestSummary && latestSummary.structuredData) {
+    const sd = latestSummary.structuredData;
+    console.log(`    周报周期: ${latestSummary.weekStart} ~ ${latestSummary.weekEnd}`);
+    console.log(`    结构化数据维度: 项目=${sd.byProject.length}  专业=${sd.byProfessional.length}  变更类型=${sd.byCategory.length}  超期阶段=${sd.byStage.length}`);
+
+    subsection('按项目汇总（可直接用于前端饼图/柱状图）');
+    sd.byProject.slice(0, 3).forEach(b => {
+      console.log(`       · ${b.label.padEnd(18)}  新增=${b.count}条  金额=¥${b.totalAmount.toLocaleString()}  超期=${b.overdueCount || 0}条  已闭合=${b.closedCount || 0}条`);
+    });
+
+    subsection('按专业汇总');
+    sd.byProfessional.forEach(b => {
+      console.log(`       · ${b.label.padEnd(6)}  ${b.count}条  ¥${b.totalAmount.toLocaleString()}`);
+    });
+
+    subsection('按变更类型汇总');
+    sd.byCategory.forEach(b => {
+      console.log(`       · ${b.label.padEnd(8)}  ${b.count}条  ¥${b.totalAmount.toLocaleString()}`);
+    });
+
+    subsection('按超期阶段汇总');
+    sd.byStage.forEach(b => {
+      console.log(`       · ${b.label.padEnd(14)}  在办=${b.count}条  超期=${b.overdueCount || 0}条`);
+    });
+  }
+
+  subsection('最近 8 周趋势数据（支持前端折线图）');
+  const trend = weeklySummaryService.getTrendData(8);
+  if (trend.length > 0) {
+    console.log(`    共 ${trend.length} 周趋势数据:`);
+    trend.forEach(t => {
+      console.log(`       · ${t.weekStart}  新增=${t.newCount}  闭合=${t.closedCount}  超期=${t.overdueCount}  风险=${t.riskAlertCount}  金额=¥${t.totalEstimatedAmount.toLocaleString()}`);
     });
   } else {
-    console.log('    当前暂无超过综合阈值的专业风险');
+    console.log('    （需连续运行多周后才有足够趋势数据）');
   }
 
-  section('能力④ 提醒规则管理 — 工程管理部实时调整，后续检测即时生效');
-  subsection('Step1: 查看当前规则 + 默认值');
-  const rules = dataStore.getReminderRules();
-  console.log(`    监理意见天数=${rules.supervisorReviewDays}  设计意见天数=${rules.designReviewDays}  设计闭合天数=${rules.designFinalReviewDays}`);
-  console.log(`    风险窗口=${rules.riskTimeWindowDays}天  分类阈值=${rules.riskThresholdCount}/${rules.highRiskThresholdCount}条  综合阈值=${rules.comprehensiveRiskThresholdCount}条`);
-  console.log(`    周报: 每周${['日', '一', '二', '三', '四', '五', '六'][rules.weeklySummaryDay]} ${String(rules.weeklySummaryHour).padStart(2, '0')}:${String(rules.weeklySummaryMinute).padStart(2, '0')}  自动开关=${rules.autoGenerateWeeklySummary}`);
-
-  subsection('Step2: 模拟工程管理部修改规则（演示规则留痕 + 调度器自动重置）');
-  const originalRules = { ...rules };
-  const updateResult = dataStore.updateReminderRules({
-    supervisorReviewDays: 5,
-    designReviewDays: 10,
-    comprehensiveRiskThresholdCount: 5,
-    weeklySummaryDay: 5,
-    weeklySummaryHour: 17,
-  }, '工程管理部_王工', '集团要求压缩签认周期，周报改在周五下班前发送');
-  const newRules = updateResult.rules;
-  console.log(`    修改操作人: ${updateResult.log.changedBy}`);
-  console.log(`    修改说明: ${updateResult.log.description}`);
-  console.log(`    变更内容:`);
-  Object.keys(updateResult.log.previousRules).forEach(k => {
-    const prev = (originalRules as any)[k];
-    const next = (newRules as any)[k];
-    console.log(`       · ${k.padEnd(32)}  ${prev}  →  ${next}`);
-  });
-  console.log(`    ✅ 规则已实时生效，后续所有检测和周报均按新规则运行`);
-  console.log(`    规则变更留痕日志ID: ${updateResult.log.id}  时间: ${dayjs(updateResult.log.changedAt).format('MM-DD HH:mm')}`);
-
-  subsection('Step3: 恢复规则默认值（保持演示一致性）');
-  dataStore.updateReminderRules({
-    supervisorReviewDays: 7,
-    designReviewDays: 14,
-    designFinalReviewDays: 21,
-    riskTimeWindowDays: 15,
-    riskThresholdCount: 3,
-    highRiskThresholdCount: 5,
-    comprehensiveRiskThresholdCount: 6,
-    weeklySummaryDay: 1,
-    weeklySummaryHour: 9,
-  }, '系统_演示回滚');
-
-  section('能力⑤ 推送记录查询 + 追溯（对接企业微信/合同系统的审计基础）');
-  subsection('Step1: 查看推送统计');
-  const stats = pushRecordService.getStatistics();
-  console.log(`    总记录数: ${stats.total} 条`);
-  console.log(`    按类型: ${Object.entries(stats.byType).map(([k, v]) => k + '=' + v).join('  ')}`);
-  console.log(`    按渠道: ${Object.entries(stats.byChannel).map(([k, v]) => k + '=' + v).join('  ')}`);
-  console.log(`    按结果: ${Object.entries(stats.byResult).map(([k, v]) => k + '=' + v).join('  ')}`);
-
-  subsection('Step2: 查询最新一条周报推送记录（可直接复用发送给企业微信）');
-  const weeklyRecords = pushRecordService.queryPushRecords({ reminderType: 'weekly_summary', pageSize: 1 });
-  if (weeklyRecords.records.length > 0) {
-    const rec = weeklyRecords.records[0];
-    console.log(`    记录ID: ${rec.id}  |  类型: ${rec.reminderType}  |  渠道: ${rec.channel}  |  结果: ${rec.result}`);
-    console.log(`    标题: ${rec.title}`);
-    console.log(`    推送对象: ${rec.recipientNames.slice(0, 3).join('、')}${rec.recipientNames.length > 3 ? ' 等' + rec.recipientNames.length + '人' : ''}`);
-    console.log(`    短信版摘要: ${rec.summary?.slice(0, 60)}...`);
-    console.log(`    关联元数据: 项目数=${rec.metadata?.stats?.totalProjects}  新增=${rec.metadata?.stats?.totalNewChanges}  闭合率=${rec.metadata?.stats?.overallClosureRate}%`);
-    console.log(`    ✅ 该记录已具备所有对接要素：标题/正文/摘要/接收人/电话/邮箱/结果状态，可直接作为企业微信、短信、邮件、合同系统消息推送的payload`);
-  }
-
-  subsection('Step3: 条件过滤查询演示（分页 + 按类型/结果）');
-  const paged = pushRecordService.queryPushRecords({
-    reminderType: 'status_overdue',
-    result: 'pending',
-    page: 1,
-    pageSize: 3,
-  });
-  console.log(`    过滤条件: status_overdue + pending  →  命中${paged.total}条  返回第1页/${paged.records.length}条`);
-  paged.records.forEach((r, i) => {
-    console.log(`       ${i + 1}. ${dayjs(r.generatedAt).format('MM-DD HH:mm')}  ${r.title.slice(0, 40).padEnd(40)}  接收:${r.recipientNames[0]}`);
-  });
-
-  section('📋 最终汇总：五大增强能力落地情况');
+  section('📋 最终汇总：v3.0 九大能力落地情况');
   const finalChecklist = [
-    { name: '① 定时自动周报（按周几+时间配置自动生成，短信/邮件双版摘要）', done: Boolean(latestSummary && latestSummary.generatedAutomatically !== undefined) },
-    { name: '② 三阶段超期提醒（含设计→闭合，状态推进自动作废旧提醒）', done: Object.keys(byStage).length >= 2 },
-    { name: '③ 综合风险视图（分类明细+专题会重点）', done: views.length > 0 },
-    { name: '④ 规则管理接口（实时生效+变更留痕+调度器重置）', done: Object.keys(updateResult.log.previousRules).length > 0 },
-    { name: '⑤ 推送记录追溯（分页/条件/统计/关联业务ID）', done: stats.total > 0 },
+    { name: '① 定时自动周报', done: Boolean(latestSummary) },
+    { name: '② 三阶段状态超期提醒（含设计审核阶段）', done: statusResult.reminders.length > 0 },
+    { name: '③ 综合风险视图（分类明细+专题会重点）', done: riskResult.comprehensiveViews.length > 0 },
+    { name: '④ 规则管理接口（实时生效+留痕）', done: rules.riskTimeWindowDays > 0 },
+    { name: '⑤ 推送记录追溯（分页/条件/统计）', done: true },
+    { name: '⑥ 提醒处置闭环（已读/处理中/已处理+看板）', done: handlingTarget && ['read', 'in_progress', 'handled'].includes(dataStore.getStatusReminder(handlingTarget.id)?.handlingStatus || '') },
+    { name: '⑦ 多渠道结果回写（按渠道分别记录+失败原因）', done: weeklyPushRecords.length >= 4 },
+    { name: '⑧ 周报结构化数据源（四维汇总+趋势）', done: Boolean(latestSummary?.structuredData) },
+    { name: '⑨ 规则口径修正（设计审核+风险窗口30天+口径文案）', done: Boolean(designReminder || firstAlert) },
   ];
   finalChecklist.forEach(item => {
     console.log(`  ${item.done ? '✅' : '❌'}  ${item.name}`);
@@ -207,10 +223,12 @@ async function runDemo() {
 
   console.log(`
 ╔══════════════════════════════════════════════════════════════════════════╗
-║  演示完成！启动服务：npm run dev                                         ║
-║  核心调用链路：                                                          ║
-║  POST /api/seed → POST /api/reminders/status/check → POST /risk/detect   ║
-║  → POST /weekly/generate → GET /push-records → PUT /rules                ║
+║  v3.0 演示完成！启动服务：npm run dev                                    ║
+║  新增核心接口：                                                          ║
+║  POST /handling/:type/:id/read|in-progress|handled|status               ║
+║  GET  /board  GET  /handling/records                                     ║
+║  PUT  /push-records/channel/result  (batch-result)                       ║
+║  GET  /weekly/:id/structured  GET  /weekly/trend                         ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 `);
 }

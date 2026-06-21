@@ -31,8 +31,8 @@ export class RiskAlertService {
     let pushRecordCount = 0;
     if (autoCreatePushRecords) {
       for (const alert of categoryAlerts) {
-        pushRecordService.createPushRecordForRiskAlert(alert, ['system'], 'pending');
-        pushRecordCount++;
+        const records = pushRecordService.createPushRecordForRiskAlert(alert, ['system'], 'pending');
+        pushRecordCount += records.length;
       }
       for (const view of comprehensiveViews) {
         if (view.overallRiskLevel === 'high' || view.overallRiskLevel === 'medium') {
@@ -47,14 +47,15 @@ export class RiskAlertService {
             changes: view.categoryBreakdown.flatMap(b => b.changes),
             riskLevel: view.overallRiskLevel,
             suggestion: view.overallSuggestion,
+            handlingStatus: 'unread' as const,
             createdAt: view.createdAt,
           };
-          pushRecordService.createPushRecordForRiskAlert(
+          const records = pushRecordService.createPushRecordForRiskAlert(
             pushReminder as any,
             ['system'],
             'pending'
           );
-          pushRecordCount++;
+          pushRecordCount += records.length;
         }
       }
     }
@@ -101,8 +102,10 @@ export class RiskAlertService {
       const project = dataStore.getProject(projectId);
       if (!project) continue;
 
+      const fullRules = dataStore.getReminderRules();
       const riskLevel = recentChanges.length >= rules.highRiskThresholdCount ? 'high' : 'medium';
       const totalAmount = recentChanges.reduce((s, c) => s + c.estimatedAmount, 0);
+      const handlingDeadline = dayjs().add(fullRules.reminderHandlingDeadlineDays, 'day').toISOString();
 
       const riskItems = recentChanges
         .sort((a, b) => dayjs(b.registeredDate).valueOf() - dayjs(a.registeredDate).valueOf())
@@ -124,8 +127,11 @@ export class RiskAlertService {
           category as ChangeCategory,
           professional as Professional,
           recentChanges.length,
-          riskLevel
+          riskLevel,
+          rules.riskTimeWindowDays
         ),
+        handlingStatus: 'unread',
+        handlingDeadline,
         createdAt: dayjs().toISOString(),
       };
 
@@ -165,7 +171,8 @@ export class RiskAlertService {
         recentChanges,
         professional as Professional,
         rules.riskThresholdCount,
-        rules.highRiskThresholdCount
+        rules.highRiskThresholdCount,
+        rules.riskTimeWindowDays
       );
 
       const totalCount = recentChanges.length;
@@ -191,7 +198,8 @@ export class RiskAlertService {
         overallRiskLevel,
         totalCount,
         categoryBreakdown,
-        meetingFocus
+        meetingFocus,
+        rules.riskTimeWindowDays
       );
 
       const view: ComprehensiveRiskView = {
@@ -265,7 +273,8 @@ export class RiskAlertService {
     changes: ChangeNegotiation[],
     professional: Professional,
     threshold: number,
-    highThreshold: number
+    highThreshold: number,
+    timeWindowDays: number = 30
   ): RiskCategoryBreakdown[] {
     const byCategory: Record<string, ChangeNegotiation[]> = {};
     for (const c of changes) {
@@ -294,7 +303,8 @@ export class RiskAlertService {
           cat as ChangeCategory,
           professional,
           count,
-          riskLevel
+          riskLevel,
+          timeWindowDays
         ),
       });
     }
@@ -306,17 +316,18 @@ export class RiskAlertService {
     category: ChangeCategory,
     professional: Professional,
     count: number,
-    riskLevel: 'high' | 'medium' | 'low'
+    riskLevel: 'high' | 'medium' | 'low',
+    timeWindowDays: number = 30
   ): string {
     const categoryText = categoryLabels[category];
     const professionalText = professionalLabels[professional];
     const levelPrefix = riskLevel === 'high' ? '【高风险】' : riskLevel === 'medium' ? '【中风险】' : '【关注】';
 
     const suggestions: Record<ChangeCategory, string> = {
-      design_omission: `近期${professionalText}专业出现${count}起设计遗漏类变更，建议项目部组织设计、施工、监理三方召开专题会，系统性复核施工图纸，建立图纸会审清单制度，避免同类问题重复发生。`,
-      site_condition: `近期${professionalText}专业出现${count}起现场条件变化类变更，建议项目部集中比对勘察资料与现场实际，评估对工期造价的总体影响，完善地质条件确认、签证影像、工程量确认单等索赔证据链。`,
-      material_substitution: `近期${professionalText}专业出现${count}起材料替换类变更，建议项目部专题评审替换方案的成本增量、性能指标与供应周期，建立材料选型封样制度，统一设计变更流程和报审口径。`,
-      other: `近期${professionalText}专业出现${count}起其他类变更，请项目部核查变更原因，完善资料归档。`,
+      design_omission: `近${timeWindowDays}天${professionalText}专业出现${count}起设计遗漏类变更，建议项目部组织设计、施工、监理三方召开专题会，系统性复核施工图纸，建立图纸会审清单制度，避免同类问题重复发生。`,
+      site_condition: `近${timeWindowDays}天${professionalText}专业出现${count}起现场条件变化类变更，建议项目部集中比对勘察资料与现场实际，评估对工期造价的总体影响，完善地质条件确认、签证影像、工程量确认单等索赔证据链。`,
+      material_substitution: `近${timeWindowDays}天${professionalText}专业出现${count}起材料替换类变更，建议项目部专题评审替换方案的成本增量、性能指标与供应周期，建立材料选型封样制度，统一设计变更流程和报审口径。`,
+      other: `近${timeWindowDays}天${professionalText}专业出现${count}起其他类变更，请项目部核查变更原因，完善资料归档。`,
     };
 
     return levelPrefix + suggestions[category];
@@ -348,16 +359,17 @@ export class RiskAlertService {
     riskLevel: 'high' | 'medium' | 'low',
     totalCount: number,
     breakdown: RiskCategoryBreakdown[],
-    meetingFocus: string[]
+    meetingFocus: string[],
+    timeWindowDays: number = 30
   ): string {
     const professionalText = professionalLabels[professional];
     const levelText = riskLevel === 'high' ? '高风险' : riskLevel === 'medium' ? '中风险' : '需关注';
     const categories = breakdown.map(b => categoryLabels[b.category]).join('、');
 
-    return `【${levelText}】${projectName}的${professionalText}专业在近15天内共出现${totalCount}条变更（涉及${categories}），` +
+    return `【${levelText}】${projectName}的${professionalText}专业在近${timeWindowDays}天内共出现${totalCount}条变更（涉及${categories}），` +
       `累计涉及金额较大，存在成本失控与索赔证据不足风险。` +
       `建议由工程管理部牵头，${riskLevel === 'high' ? '3个工作日内' : '本周内'}组织设计、施工、监理、造价四方召开专题会，` +
-      `围绕以下重点展开：${meetingFocus.slice(0, 2).join('；')}。会后形成会议纪要并跟踪整改落实。`;
+      `围绕以下重点展开：${meetingFocus.slice(0, 2).join('；')}。会后形成会议纪要并跟踪整改落实。（统计口径：近${timeWindowDays}天）`;
   }
 
   getAlertsByProject(projectId: string): RiskAlert[] {

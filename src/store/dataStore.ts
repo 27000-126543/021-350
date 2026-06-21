@@ -12,6 +12,11 @@ import {
   PushRecord,
   ReminderRulesLog,
   ChangeStatus,
+  ReminderHandlingStatus,
+  ReminderHandlingRecord,
+  ProjectReminderBoard,
+  ReminderBoardItem,
+  handlingStatusLabels,
 } from '../types';
 
 class DataStore {
@@ -24,6 +29,7 @@ class DataStore {
   private reminderRules: ReminderRules = { ...defaultReminderRules };
   private reminderRulesLogs: Map<string, ReminderRulesLog> = new Map();
   private pushRecords: Map<string, PushRecord> = new Map();
+  private reminderHandlingRecords: Map<string, ReminderHandlingRecord> = new Map();
 
   generateId(): string {
     return uuidv4();
@@ -342,6 +348,218 @@ class DataStore {
       byChannel: channelStats,
       byResult: resultStats,
     };
+  }
+
+  getPushRecordsByReminderGrouped(reminderType: string, reminderId: string) {
+    const records = this.getPushRecordsByReminder(reminderType, reminderId);
+    const grouped: Record<string, PushRecord[]> = {};
+    for (const r of records) {
+      if (!grouped[r.channel]) grouped[r.channel] = [];
+      grouped[r.channel].push(r);
+    }
+    return grouped;
+  }
+
+  updatePushRecordChannelResult(
+    reminderType: string,
+    reminderId: string,
+    channel: string,
+    result: 'success' | 'failed',
+    resultMessage?: string
+  ): PushRecord[] {
+    const updated: PushRecord[] = [];
+    const now = dayjs().toISOString();
+    for (const record of this.pushRecords.values()) {
+      if (record.reminderType === reminderType && record.reminderId === reminderId && record.channel === channel) {
+        const newRecord = {
+          ...record,
+          result,
+          resultMessage,
+          pushedAt: now,
+        };
+        this.pushRecords.set(record.id, newRecord);
+        updated.push(newRecord);
+      }
+    }
+    return updated;
+  }
+
+  addHandlingRecord(record: ReminderHandlingRecord): ReminderHandlingRecord {
+    this.reminderHandlingRecords.set(record.id, record);
+    return record;
+  }
+
+  getHandlingRecordsByReminder(reminderId: string): ReminderHandlingRecord[] {
+    return Array.from(this.reminderHandlingRecords.values())
+      .filter(r => r.reminderId === reminderId)
+      .sort((a, b) => new Date(b.handledAt).getTime() - new Date(a.handledAt).getTime());
+  }
+
+  getHandlingRecordsByProject(projectId: string): ReminderHandlingRecord[] {
+    return Array.from(this.reminderHandlingRecords.values())
+      .filter(r => r.projectId === projectId)
+      .sort((a, b) => new Date(b.handledAt).getTime() - new Date(a.handledAt).getTime());
+  }
+
+  getStatusReminder(id: string): StatusReminder | undefined {
+    return this.statusReminders.get(id);
+  }
+
+  getRiskAlert(id: string): RiskAlert | undefined {
+    return this.riskAlerts.get(id);
+  }
+
+  updateReminderHandling(
+    reminderType: 'status_overdue' | 'risk_alert',
+    reminderId: string,
+    status: ReminderHandlingStatus,
+    handledBy: string,
+    handlingNote?: string,
+    handlingAttachments?: string[]
+  ): { reminder: StatusReminder | RiskAlert | undefined; record: ReminderHandlingRecord } {
+    const now = dayjs().toISOString();
+    let reminder: StatusReminder | RiskAlert | undefined;
+    let previousStatus: ReminderHandlingStatus = 'unread';
+
+    if (reminderType === 'status_overdue') {
+      reminder = this.statusReminders.get(reminderId);
+      if (reminder) {
+        previousStatus = reminder.handlingStatus;
+        const updates: Partial<StatusReminder> = {
+          handlingStatus: status,
+          handledBy,
+          handledAt: now,
+          lastUpdatedAt: now,
+        };
+        if (handlingNote !== undefined) updates.handlingNote = handlingNote;
+        if (handlingAttachments !== undefined) updates.handlingAttachments = handlingAttachments;
+        reminder = { ...reminder, ...updates };
+        this.statusReminders.set(reminderId, reminder as StatusReminder);
+      }
+    } else {
+      reminder = this.riskAlerts.get(reminderId);
+      if (reminder) {
+        previousStatus = reminder.handlingStatus;
+        const updates: Partial<RiskAlert> = {
+          handlingStatus: status,
+          handledBy,
+          handledAt: now,
+        };
+        if (handlingNote !== undefined) updates.handlingNote = handlingNote;
+        if (handlingAttachments !== undefined) updates.handlingAttachments = handlingAttachments;
+        reminder = { ...reminder, ...updates };
+        this.riskAlerts.set(reminderId, reminder as RiskAlert);
+      }
+    }
+
+    const record: ReminderHandlingRecord = {
+      id: this.generateId(),
+      reminderId,
+      reminderType,
+      projectId: reminder?.projectId || '',
+      projectName: reminder?.projectName || '',
+      previousStatus,
+      newStatus: status,
+      handledBy,
+      handledAt: now,
+      handlingNote,
+      handlingAttachments,
+    };
+    this.reminderHandlingRecords.set(record.id, record);
+
+    return { reminder, record };
+  }
+
+  refreshOverdueHandlingStatus(): number {
+    const now = dayjs();
+    let updated = 0;
+    for (const reminder of this.statusReminders.values()) {
+      if (reminder.handlingDeadline && !['handled', 'overdue_unhandled'].includes(reminder.handlingStatus)) {
+        if (now.isAfter(dayjs(reminder.handlingDeadline))) {
+          this.statusReminders.set(reminder.id, {
+            ...reminder,
+            handlingStatus: 'overdue_unhandled',
+            lastUpdatedAt: now.toISOString(),
+          });
+          updated++;
+        }
+      }
+    }
+    for (const alert of this.riskAlerts.values()) {
+      if (alert.handlingDeadline && !['handled', 'overdue_unhandled'].includes(alert.handlingStatus)) {
+        if (now.isAfter(dayjs(alert.handlingDeadline))) {
+          this.riskAlerts.set(alert.id, {
+            ...alert,
+            handlingStatus: 'overdue_unhandled',
+          });
+          updated++;
+        }
+      }
+    }
+    return updated;
+  }
+
+  buildReminderBoard(projectId?: string): ProjectReminderBoard[] {
+    const projects = projectId ? [this.getProject(projectId)].filter(Boolean) as Project[] : this.getAllProjects();
+    const boards: ProjectReminderBoard[] = [];
+
+    for (const p of projects) {
+      const items: ReminderBoardItem[] = [];
+
+      for (const r of this.getStatusRemindersByProject(p.id, true)) {
+        items.push({
+          reminderId: r.id,
+          reminderType: 'status_overdue',
+          projectId: r.projectId,
+          projectName: r.projectName,
+          title: `${r.changeCode} ${r.changeTitle}`,
+          description: `超期${r.overdueDays}天 · ${handlingStatusLabels[r.handlingStatus]}`,
+          stage: r.stage,
+          overdueDays: r.overdueDays,
+          handlingStatus: r.handlingStatus,
+          recipient: r.recipient,
+          createdAt: r.createdAt,
+          handlingDeadline: r.handlingDeadline,
+        });
+      }
+
+      for (const a of this.getRiskAlertsByProject(p.id)) {
+        items.push({
+          reminderId: a.id,
+          reminderType: 'risk_alert',
+          projectId: a.projectId,
+          projectName: a.projectName,
+          title: `风险提示·${a.professional}专业·${a.category}`,
+          description: `近${a.timeWindowDays}天${a.changeCount}条 · ${handlingStatusLabels[a.handlingStatus]}`,
+          riskLevel: a.riskLevel,
+          handlingStatus: a.handlingStatus,
+          recipient: p.projectManager,
+          createdAt: a.createdAt,
+          handlingDeadline: a.handlingDeadline,
+        });
+      }
+
+      boards.push({
+        projectId: p.id,
+        projectName: p.name,
+        unread: items.filter(i => i.handlingStatus === 'unread'),
+        inProgress: items.filter(i => ['read', 'in_progress'].includes(i.handlingStatus)),
+        handled: items.filter(i => i.handlingStatus === 'handled'),
+        overdueUnhandled: items.filter(i => i.handlingStatus === 'overdue_unhandled'),
+        summary: {
+          total: items.length,
+          unreadCount: items.filter(i => i.handlingStatus === 'unread').length,
+          inProgressCount: items.filter(i => ['read', 'in_progress'].includes(i.handlingStatus)).length,
+          handledCount: items.filter(i => i.handlingStatus === 'handled').length,
+          overdueUnhandledCount: items.filter(i => i.handlingStatus === 'overdue_unhandled').length,
+        },
+      });
+    }
+    return boards;
+  }
+
+  getWeeklySummariesTrend(weeks: number = 8): WeeklySummary[] {
+    return this.getAllWeeklySummaries().slice(0, weeks);
   }
 
   clearAll(): void {

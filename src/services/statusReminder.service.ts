@@ -44,6 +44,7 @@ export class StatusReminderService {
       if (!project) continue;
 
       const now = dayjs().toISOString();
+      const handlingDeadline = dayjs().add(rules.reminderHandlingDeadlineDays, 'day').toISOString();
       const reminder: StatusReminder = {
         id: dataStore.generateId(),
         type: 'status_overdue',
@@ -64,6 +65,8 @@ export class StatusReminderService {
         recipient: project.projectManager,
         recipientPhone: project.projectManagerPhone,
         recipientEmail: project.projectManagerEmail,
+        handlingStatus: 'unread',
+        handlingDeadline,
         createdAt: now,
         lastUpdatedAt: now,
       };
@@ -75,8 +78,8 @@ export class StatusReminderService {
     let pushRecordCount = 0;
     if (autoCreatePushRecords) {
       for (const reminder of newReminders) {
-        pushRecordService.createPushRecordForStatusReminder(reminder, ['system'], 'pending');
-        pushRecordCount++;
+        const records = pushRecordService.createPushRecordForStatusReminder(reminder, ['system'], 'pending');
+        pushRecordCount += records.length;
       }
     }
 
@@ -133,9 +136,8 @@ export class StatusReminderService {
       }
 
       case 'design_review': {
-        const baseDate = designOpinionDate ||
-          (supervisorOpinionDate || registeredDate.add(rules.supervisorReviewDays, 'day')).add(rules.designReviewDays, 'day');
-        const reviewDays = rules.designFinalReviewDays;
+        const baseDate = supervisorOpinionDate || registeredDate.add(rules.supervisorReviewDays, 'day');
+        const reviewDays = rules.designReviewDays;
         const dueDate = baseDate.add(reviewDays, 'day');
         return {
           isOverdue: now.isAfter(dueDate),
@@ -203,6 +205,12 @@ export class StatusReminderService {
     const statusText = statusLabels[reminder.currentStatus];
     const categoryText = categoryLabels[reminder.category];
     const stageText = stageLabels[reminder.stage];
+    const rules = dataStore.getReminderRules();
+    const stageRuleText = reminder.stage === 'registered_to_supervisor'
+      ? `监理意见签认周期 ${rules.supervisorReviewDays} 天`
+      : reminder.stage === 'supervisor_to_design'
+        ? `设计意见反馈周期 ${rules.designReviewDays} 天`
+        : `设计审核到最终闭合 ${rules.designReviewDays} 天`;
 
     return `【变更洽商超期提醒】
 项目名称：${reminder.projectName}
@@ -214,7 +222,8 @@ export class StatusReminderService {
 阶段起始：${reminder.stageStartDate}
 应完成日期：${reminder.dueDate}
 已超期：${reminder.overdueDays} 天
-请项目负责人 ${reminder.recipient} 尽快跟进处理。
+规则口径：${stageRuleText}
+请项目负责人 ${reminder.recipient} 尽快跟进处理，如需延期请说明原因。
 ——工程管理部智能提醒中心`;
   }
 

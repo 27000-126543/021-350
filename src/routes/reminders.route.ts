@@ -5,12 +5,14 @@ import { riskAlertService } from '../services/riskAlert.service';
 import { weeklySummaryService } from '../services/weeklySummary.service';
 import { pushRecordService } from '../services/pushRecord.service';
 import { taskSchedulerService } from '../services/taskScheduler.service';
+import { reminderHandlingService } from '../services/reminderHandling.service';
 import { dataStore } from '../store/dataStore';
 import {
   ReminderRules,
   ReminderType,
   PushChannel,
   PushResult,
+  ReminderHandlingStatus,
 } from '../types';
 
 const router = Router();
@@ -289,12 +291,13 @@ router.get('/rules', (req: Request, res: Response) => {
       supervisorReviewDays: 7,
       designReviewDays: 14,
       designFinalReviewDays: 21,
-      riskTimeWindowDays: 15,
+      riskTimeWindowDays: 30,
       riskThresholdCount: 3,
       highRiskThresholdCount: 5,
       comprehensiveRiskThresholdCount: 6,
       weeklySummaryDay: 1,
       weeklySummaryHour: 9,
+      reminderHandlingDeadlineDays: 3,
     },
   });
 });
@@ -309,6 +312,7 @@ router.put('/rules', (req: Request, res: Response) => {
     'comprehensiveRiskThresholdCount', 'weeklySummaryDay', 'weeklySummaryHour',
     'weeklySummaryMinute', 'autoRunStatusCheck', 'autoRunRiskCheck',
     'autoGenerateWeeklySummary', 'statusCheckCronExpression', 'riskCheckCronExpression',
+    'reminderHandlingDeadlineDays',
   ];
 
   const filteredUpdates: Partial<ReminderRules> = {};
@@ -448,6 +452,209 @@ router.put('/push-records/:id/result', (req: Request, res: Response) => {
     return;
   }
   res.json({ code: 0, message: '推送结果已更新', data: updated });
+});
+
+// ============================================================
+// 五-B. 多渠道推送结果回写接口（按 reminderId + channel 维度）
+// ============================================================
+
+router.get('/push-records/by-reminder-grouped/:type/:reminderId', (req: Request, res: Response) => {
+  const { type, reminderId } = req.params;
+  const grouped = pushRecordService.getByReminderGrouped(
+    type as ReminderType,
+    reminderId,
+  );
+  res.json({
+    code: 0,
+    message: 'success',
+    data: grouped,
+  });
+});
+
+router.put('/push-records/channel/result', (req: Request, res: Response) => {
+  const { reminderType, reminderId, channel, result, resultMessage } = req.body;
+  if (!reminderType || !reminderId || !channel || !result) {
+    res.status(400).json({ code: 400, message: '缺少必要参数: reminderType, reminderId, channel, result', data: null });
+    return;
+  }
+  const updated = pushRecordService.updateChannelResult(
+    reminderType as ReminderType,
+    reminderId,
+    channel as PushChannel,
+    result as 'success' | 'failed',
+    resultMessage,
+  );
+  res.json({
+    code: 0,
+    message: `已更新 ${updated.length} 条「${channel}」渠道记录`,
+    data: updated,
+  });
+});
+
+router.put('/push-records/channel/batch-result', (req: Request, res: Response) => {
+  const { items } = req.body as { items: any[] };
+  if (!items || !Array.isArray(items)) {
+    res.status(400).json({ code: 400, message: 'items 必须为数组', data: null });
+    return;
+  }
+  const result = pushRecordService.batchUpdateChannelResults(items);
+  res.json({
+    code: 0,
+    message: `批量处理完成：成功${result.success}条，失败${result.failed}条`,
+    data: result,
+  });
+});
+
+// ============================================================
+// 五-C. 提醒处置闭环接口
+// ============================================================
+
+router.post('/handling/:type/:id/read', (req: Request, res: Response) => {
+  const { type, id } = req.params;
+  const { handledBy = 'current_user' } = req.body;
+  const result = reminderHandlingService.markAsRead(
+    type as 'status_overdue' | 'risk_alert',
+    id,
+    handledBy as string,
+  );
+  res.json({
+    code: result.success ? 0 : 400,
+    message: result.message,
+    data: result.record || null,
+  });
+});
+
+router.post('/handling/:type/:id/in-progress', (req: Request, res: Response) => {
+  const { type, id } = req.params;
+  const { handledBy = 'current_user', handlingNote, handlingAttachments } = req.body;
+  const result = reminderHandlingService.markInProgress(
+    type as 'status_overdue' | 'risk_alert',
+    id,
+    handledBy as string,
+    handlingNote,
+    handlingAttachments,
+  );
+  res.json({
+    code: result.success ? 0 : 400,
+    message: result.message,
+    data: result.record || null,
+  });
+});
+
+router.post('/handling/:type/:id/handled', (req: Request, res: Response) => {
+  const { type, id } = req.params;
+  const { handledBy = 'current_user', handlingNote, handlingAttachments } = req.body;
+  if (!handlingNote) {
+    res.status(400).json({ code: 400, message: '已处理状态必须填写处理说明(handlingNote)', data: null });
+    return;
+  }
+  const result = reminderHandlingService.markAsHandled(
+    type as 'status_overdue' | 'risk_alert',
+    id,
+    handledBy as string,
+    handlingNote,
+    handlingAttachments,
+  );
+  res.json({
+    code: result.success ? 0 : 400,
+    message: result.message,
+    data: result.record || null,
+  });
+});
+
+router.post('/handling/:type/:id/status', (req: Request, res: Response) => {
+  const { type, id } = req.params;
+  const { status, handledBy = 'current_user', handlingNote, handlingAttachments } = req.body;
+  if (!status) {
+    res.status(400).json({ code: 400, message: '缺少 status 参数', data: null });
+    return;
+  }
+  const result = reminderHandlingService.updateHandling(
+    type as 'status_overdue' | 'risk_alert',
+    id,
+    status as ReminderHandlingStatus,
+    handledBy as string,
+    handlingNote,
+    handlingAttachments,
+  );
+  res.json({
+    code: result.success ? 0 : 400,
+    message: result.message,
+    data: result.record || null,
+  });
+});
+
+router.get('/handling/records', (req: Request, res: Response) => {
+  const { reminderType, reminderId, projectId } = req.query;
+  const records = reminderHandlingService.getHandlingRecords(
+    reminderType as 'status_overdue' | 'risk_alert' | undefined,
+    reminderId as string | undefined,
+    projectId as string | undefined,
+  );
+  res.json({
+    code: 0,
+    message: 'success',
+    data: records,
+    total: records.length,
+  });
+});
+
+router.post('/handling/refresh-overdue', (req: Request, res: Response) => {
+  const result = reminderHandlingService.refreshOverdueStatus();
+  res.json({
+    code: 0,
+    message: result.message,
+    data: { updatedCount: result.updated },
+  });
+});
+
+// ============================================================
+// 五-D. 项目提醒看板查询
+// ============================================================
+
+router.get('/board', (req: Request, res: Response) => {
+  const { projectId } = req.query;
+  const boards = reminderHandlingService.getBoard(projectId as string | undefined);
+  res.json({
+    code: 0,
+    message: 'success',
+    data: boards,
+    totalProjects: boards.length,
+    totalItems: boards.reduce((s, b) => s + b.summary.total, 0),
+  });
+});
+
+// ============================================================
+// 三-B. 周报结构化数据 & 趋势接口
+// ============================================================
+
+router.get('/weekly/:id/structured', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const summaries = weeklySummaryService.getAllSummaries();
+  const summary = summaries.find(s => s.id === id);
+  if (!summary) {
+    res.status(404).json({ code: 404, message: '周报不存在', data: null });
+    return;
+  }
+  res.json({
+    code: 0,
+    message: 'success',
+    data: summary.structuredData || null,
+    weekStart: summary.weekStart,
+    weekEnd: summary.weekEnd,
+  });
+});
+
+router.get('/weekly/trend', (req: Request, res: Response) => {
+  const { weeks = '8' } = req.query;
+  const w = Math.min(Math.max(2, parseInt(weeks as string, 10) || 8), 52);
+  const trend = weeklySummaryService.getTrendData(w);
+  res.json({
+    code: 0,
+    message: 'success',
+    data: trend,
+    weeks: w,
+  });
 });
 
 // ============================================================

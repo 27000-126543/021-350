@@ -4,6 +4,13 @@ import {
   WeeklySummary,
   ProjectWeeklyStats,
   ChangeNegotiation,
+  WeeklyStructuredData,
+  WeeklyDimensionBucket,
+  WeeklyTrendPoint,
+  professionalLabels,
+  categoryLabels,
+  stageLabels,
+  ReminderStage,
 } from '../types';
 import { statusReminderService } from './statusReminder.service';
 import { pushRecordService } from './pushRecord.service';
@@ -78,6 +85,14 @@ export class WeeklySummaryService {
       totalRiskAlerts
     );
 
+    const structuredData = this.buildStructuredData(
+      projects,
+      allChanges,
+      weekStart,
+      weekEnd
+    );
+    structuredData.weeklyTrend = this.buildTrendData(8);
+
     const summary: WeeklySummary = {
       id: dataStore.generateId(),
       type: 'weekly_summary',
@@ -105,18 +120,19 @@ export class WeeklySummaryService {
       })),
       summaryText,
       smsText,
+      structuredData,
     };
 
     dataStore.addWeeklySummary(summary);
 
     let pushRecordCount = 0;
     if (autoCreatePushRecord) {
-      pushRecordService.createPushRecordForWeeklySummary(
+      const records = pushRecordService.createPushRecordForWeeklySummary(
         summary,
         ['system', 'email'],
         'pending'
       );
-      pushRecordCount = 1;
+      pushRecordCount = records.length;
     }
 
     return { summary, pushRecordCount };
@@ -207,9 +223,8 @@ export class WeeklySummaryService {
         baseDate = supervisorOpinionDate || registeredDate.add(rules.supervisorReviewDays, 'day');
         break;
       case 'design_review':
-        reviewDays = rules.designFinalReviewDays;
-        baseDate = designOpinionDate ||
-          (supervisorOpinionDate || registeredDate.add(rules.supervisorReviewDays, 'day')).add(rules.designReviewDays, 'day');
+        reviewDays = rules.designReviewDays;
+        baseDate = supervisorOpinionDate || registeredDate.add(rules.supervisorReviewDays, 'day');
         break;
       default:
         return 0;
@@ -348,6 +363,96 @@ export class WeeklySummaryService {
       weekStart: now.startOf('week').add(1, 'day').format('YYYY-MM-DD'),
       weekEnd: now.endOf('week').add(1, 'day').format('YYYY-MM-DD'),
     };
+  }
+
+  private buildStructuredData(
+    projects: { id: string; name: string }[],
+    allChanges: ChangeNegotiation[],
+    weekStart: string,
+    weekEnd: string
+  ): WeeklyStructuredData {
+    const weekStartDate = dayjs(weekStart);
+    const weekEndDate = dayjs(weekEnd);
+
+    const byProject: WeeklyDimensionBucket[] = projects.map(p => {
+      const changes = allChanges.filter(c => c.projectId === p.id);
+      const inWeek = changes.filter(c => {
+        const d = dayjs(c.registeredDate);
+        return d.isAfter(weekStartDate.subtract(1, 'ms')) && d.isBefore(weekEndDate);
+      });
+      return {
+        key: p.id,
+        label: p.name,
+        count: inWeek.length,
+        totalAmount: inWeek.reduce((s, c) => s + c.estimatedAmount, 0),
+        overdueCount: changes.filter(c => c.status !== 'closed' && c.status !== 'rejected' && this.calculateOverdueDays(c) > 0).length,
+        closedCount: changes.filter(c => c.status === 'closed').length,
+      };
+    }).filter(b => b.count > 0 || b.overdueCount! > 0);
+
+    const byProfessionalMap: Record<string, WeeklyDimensionBucket> = {};
+    const byCategoryMap: Record<string, WeeklyDimensionBucket> = {};
+    for (const c of allChanges) {
+      const d = dayjs(c.registeredDate);
+      if (!(d.isAfter(weekStartDate.subtract(1, 'ms')) && d.isBefore(weekEndDate))) continue;
+
+      if (!byProfessionalMap[c.professional]) {
+        byProfessionalMap[c.professional] = { key: c.professional, label: professionalLabels[c.professional] || c.professional, count: 0, totalAmount: 0 };
+      }
+      byProfessionalMap[c.professional].count++;
+      byProfessionalMap[c.professional].totalAmount += c.estimatedAmount;
+
+      if (!byCategoryMap[c.category]) {
+        byCategoryMap[c.category] = { key: c.category, label: categoryLabels[c.category] || c.category, count: 0, totalAmount: 0 };
+      }
+      byCategoryMap[c.category].count++;
+      byCategoryMap[c.category].totalAmount += c.estimatedAmount;
+    }
+    const byProfessional = Object.values(byProfessionalMap).sort((a, b) => b.count - a.count);
+    const byCategory = Object.values(byCategoryMap).sort((a, b) => b.count - a.count);
+
+    const stageOrder: ReminderStage[] = ['registered_to_supervisor', 'supervisor_to_design', 'design_to_close'];
+    const byStage: WeeklyDimensionBucket[] = stageOrder.map(stage => {
+      const count = allChanges.filter(c => {
+        const rules = dataStore.getReminderRules();
+        let match = false;
+        if (stage === 'registered_to_supervisor') match = c.status === 'registered';
+        else if (stage === 'supervisor_to_design') match = c.status === 'supervisor_review';
+        else if (stage === 'design_to_close') match = c.status === 'design_review';
+        return match;
+      }).length;
+      return {
+        key: stage,
+        label: stageLabels[stage],
+        count,
+        totalAmount: 0,
+        overdueCount: allChanges.filter(c => {
+          if (stage === 'registered_to_supervisor' && c.status !== 'registered') return false;
+          if (stage === 'supervisor_to_design' && c.status !== 'supervisor_review') return false;
+          if (stage === 'design_to_close' && c.status !== 'design_review') return false;
+          return this.calculateOverdueDays(c) > 0;
+        }).length,
+      };
+    });
+
+    return { byProject, byProfessional, byCategory, byStage };
+  }
+
+  private buildTrendData(weeks: number): WeeklyTrendPoint[] {
+    const summaries = dataStore.getWeeklySummariesTrend(weeks);
+    return summaries.map(s => ({
+      weekStart: s.weekStart,
+      weekEnd: s.weekEnd,
+      newCount: s.totalNewChanges,
+      closedCount: s.totalClosedChanges,
+      overdueCount: s.totalOverdueCount,
+      riskAlertCount: s.totalRiskAlerts,
+      totalEstimatedAmount: s.totalEstimatedAmount,
+    }));
+  }
+
+  getTrendData(weeks: number = 8): WeeklyTrendPoint[] {
+    return this.buildTrendData(weeks);
   }
 }
 

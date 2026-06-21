@@ -12,6 +12,8 @@ export type PushResult = 'pending' | 'success' | 'failed';
 
 export type ReminderStage = 'registered_to_supervisor' | 'supervisor_to_design' | 'design_to_close';
 
+export type ReminderHandlingStatus = 'unread' | 'read' | 'in_progress' | 'handled' | 'overdue_unhandled';
+
 export interface Project {
   id: string;
   name: string;
@@ -66,6 +68,12 @@ export interface StatusReminder {
   recipient: string;
   recipientPhone: string;
   recipientEmail?: string;
+  handlingStatus: ReminderHandlingStatus;
+  handlingNote?: string;
+  handlingAttachments?: string[];
+  handledBy?: string;
+  handledAt?: string;
+  handlingDeadline?: string;
   createdAt: string;
   lastUpdatedAt: string;
 }
@@ -100,6 +108,12 @@ export interface RiskAlert {
   changes: RiskFactorItem[];
   riskLevel: 'high' | 'medium' | 'low';
   suggestion: string;
+  handlingStatus: ReminderHandlingStatus;
+  handlingNote?: string;
+  handlingAttachments?: string[];
+  handledBy?: string;
+  handledAt?: string;
+  handlingDeadline?: string;
   createdAt: string;
 }
 
@@ -163,6 +177,80 @@ export interface WeeklySummary {
   }[];
   summaryText: string;
   smsText: string;
+  structuredData?: WeeklyStructuredData;
+}
+
+export interface ReminderHandlingRecord {
+  id: string;
+  reminderId: string;
+  reminderType: 'status_overdue' | 'risk_alert';
+  projectId: string;
+  projectName: string;
+  previousStatus: ReminderHandlingStatus;
+  newStatus: ReminderHandlingStatus;
+  handledBy: string;
+  handledAt: string;
+  handlingNote?: string;
+  handlingAttachments?: string[];
+}
+
+export interface ReminderBoardItem {
+  reminderId: string;
+  reminderType: 'status_overdue' | 'risk_alert';
+  projectId: string;
+  projectName: string;
+  title: string;
+  description: string;
+  stage?: ReminderStage;
+  riskLevel?: 'high' | 'medium' | 'low';
+  overdueDays?: number;
+  handlingStatus: ReminderHandlingStatus;
+  recipient: string;
+  createdAt: string;
+  handlingDeadline?: string;
+}
+
+export interface ProjectReminderBoard {
+  projectId: string;
+  projectName: string;
+  unread: ReminderBoardItem[];
+  inProgress: ReminderBoardItem[];
+  handled: ReminderBoardItem[];
+  overdueUnhandled: ReminderBoardItem[];
+  summary: {
+    total: number;
+    unreadCount: number;
+    inProgressCount: number;
+    handledCount: number;
+    overdueUnhandledCount: number;
+  };
+}
+
+export interface WeeklyDimensionBucket {
+  key: string;
+  label: string;
+  count: number;
+  totalAmount: number;
+  overdueCount?: number;
+  closedCount?: number;
+}
+
+export interface WeeklyStructuredData {
+  byProject: WeeklyDimensionBucket[];
+  byProfessional: WeeklyDimensionBucket[];
+  byCategory: WeeklyDimensionBucket[];
+  byStage: WeeklyDimensionBucket[];
+  weeklyTrend?: WeeklyTrendPoint[];
+}
+
+export interface WeeklyTrendPoint {
+  weekStart: string;
+  weekEnd: string;
+  newCount: number;
+  closedCount: number;
+  overdueCount: number;
+  riskAlertCount: number;
+  totalEstimatedAmount: number;
 }
 
 export interface ReminderRules {
@@ -181,6 +269,7 @@ export interface ReminderRules {
   autoGenerateWeeklySummary: boolean;
   statusCheckCronExpression?: string;
   riskCheckCronExpression?: string;
+  reminderHandlingDeadlineDays: number;
 }
 
 export interface ReminderRulesLog {
@@ -196,7 +285,7 @@ export const defaultReminderRules: ReminderRules = {
   supervisorReviewDays: 7,
   designReviewDays: 14,
   designFinalReviewDays: 21,
-  riskTimeWindowDays: 15,
+  riskTimeWindowDays: 30,
   riskThresholdCount: 3,
   highRiskThresholdCount: 5,
   comprehensiveRiskThresholdCount: 6,
@@ -206,6 +295,7 @@ export const defaultReminderRules: ReminderRules = {
   autoRunStatusCheck: true,
   autoRunRiskCheck: true,
   autoGenerateWeeklySummary: true,
+  reminderHandlingDeadlineDays: 3,
 };
 
 export interface PushRecord {
@@ -275,4 +365,12 @@ export const resultLabels: Record<PushResult, string> = {
   pending: '待推送',
   success: '推送成功',
   failed: '推送失败',
+};
+
+export const handlingStatusLabels: Record<ReminderHandlingStatus, string> = {
+  unread: '未读',
+  read: '已读',
+  in_progress: '处理中',
+  handled: '已处理',
+  overdue_unhandled: '超时未处理',
 };
